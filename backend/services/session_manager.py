@@ -1,0 +1,438 @@
+import uuid
+import json
+import pandas as pd
+from pathlib import Path
+from datetime import datetime
+from typing import Optional
+from backend.models.schemas import SessionInfo
+
+
+class SessionManager:
+    """Manages user sessions and their data files with disk persistence."""
+
+    def __init__(self, data_dir: Path):
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._sessions: dict[str, SessionInfo] = {}
+        # Load existing sessions from disk
+        self._load_existing_sessions()
+
+    def _load_existing_sessions(self):
+        """Load all existing sessions from disk on startup."""
+        if not self.data_dir.exists():
+            return
+
+        for session_dir in self.data_dir.iterdir():
+            if session_dir.is_dir():
+                session_id = session_dir.name
+                session_info = self._load_session_from_disk(session_id)
+                if session_info:
+                    self._sessions[session_id] = session_info
+                    print(f"[SessionManager] Loaded session: {session_id}")
+
+    def _load_session_from_disk(self, session_id: str) -> Optional[SessionInfo]:
+        """Load session info from disk."""
+        session_dir = self.data_dir / session_id
+        metadata_file = session_dir / "session.json"
+
+        if metadata_file.exists():
+            try:
+                data = json.loads(metadata_file.read_text(encoding="utf-8"))
+                return SessionInfo(
+                    session_id=data["session_id"],
+                    has_file=data["has_file"],
+                    filename=data.get("filename"),
+                    row_count=data.get("row_count"),
+                    column_count=data.get("column_count"),
+                    columns=data.get("columns"),
+                    created_at=datetime.fromisoformat(data["created_at"]),
+                )
+            except Exception as e:
+                print(f"[SessionManager] Failed to load session {session_id}: {e}")
+                return None
+
+        # Fallback: check if original.csv exists (old format without session.json)
+        original_file = session_dir / "original.csv"
+        if original_file.exists():
+            try:
+                df = pd.read_csv(original_file)
+                return SessionInfo(
+                    session_id=session_id,
+                    has_file=True,
+                    filename="original.csv",
+                    row_count=len(df),
+                    column_count=len(df.columns),
+                    columns=df.columns.tolist(),
+                    created_at=datetime.fromtimestamp(original_file.stat().st_mtime),
+                )
+            except Exception as e:
+                print(f"[SessionManager] Failed to read CSV for session {session_id}: {e}")
+                return None
+
+        return None
+
+    def _save_session_to_disk(self, session_id: str):
+        """Save session metadata to disk."""
+        session = self._sessions.get(session_id)
+        if not session:
+            return
+
+        session_dir = self.data_dir / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        metadata_file = session_dir / "session.json"
+
+        data = {
+            "session_id": session.session_id,
+            "has_file": session.has_file,
+            "filename": session.filename,
+            "row_count": session.row_count,
+            "column_count": session.column_count,
+            "columns": session.columns,
+            "created_at": session.created_at.isoformat(),
+        }
+
+        metadata_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def create_session(self) -> str:
+        """Create a new session and return its ID."""
+        session_id = str(uuid.uuid4())[:8]
+        session_dir = self.data_dir / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        self._sessions[session_id] = SessionInfo(
+            session_id=session_id,
+            has_file=False,
+            created_at=datetime.now(),
+        )
+        self._save_session_to_disk(session_id)
+        return session_id
+
+    def get_session(self, session_id: str) -> Optional[SessionInfo]:
+        """Get session info by ID."""
+        # First check memory
+        if session_id in self._sessions:
+            return self._sessions[session_id]
+
+        # Try to load from disk
+        session_info = self._load_session_from_disk(session_id)
+        if session_info:
+            self._sessions[session_id] = session_info
+            return session_info
+
+        return None
+
+    def session_has_file(self, session_id: str) -> bool:
+        """Check if session has an uploaded file."""
+        session = self.get_session(session_id)
+        return session.has_file if session else False
+
+    def get_session_dir(self, session_id: str) -> Path:
+        """Get the directory for a session."""
+        return self.data_dir / session_id
+
+    def save_file(self, session_id: str, filename: str, content: bytes) -> dict:
+        """
+        Save uploaded CSV file and return metadata.
+        Saves as both original.csv (never modified) and current.csv (for transformations).
+        Returns dict with row_count, column_count, columns, preview.
+        """
+        # Ensure session exists
+        if session_id not in self._sessions:
+            self._sessions[session_id] = SessionInfo(
+                session_id=session_id,
+                has_file=False,
+                created_at=datetime.now(),
+            )
+
+        session_dir = self.get_session_dir(session_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save original file (immutable backup)
+        original_path = session_dir / "original.csv"
+        original_path.write_bytes(content)
+
+        # Save current file (working copy for transformations)
+        current_path = session_dir / "current.csv"
+        current_path.write_bytes(content)
+
+        # Parse CSV and get metadata
+        df = pd.read_csv(current_path)
+
+        metadata = {
+            "row_count": len(df),
+            "column_count": len(df.columns),
+            "columns": df.columns.tolist(),
+            "preview": df.head(5).to_dict(orient="records"),
+        }
+
+        # Update session
+        self._sessions[session_id] = SessionInfo(
+            session_id=session_id,
+            has_file=True,
+            filename=filename,
+            row_count=metadata["row_count"],
+            column_count=metadata["column_count"],
+            columns=metadata["columns"],
+            created_at=self._sessions[session_id].created_at,
+        )
+
+        # Persist to disk
+        self._save_session_to_disk(session_id)
+
+        return metadata
+
+    def get_dataframe(self, session_id: str, use_current: bool = True) -> Optional[pd.DataFrame]:
+        """
+        Load the CSV file for a session as DataFrame.
+
+        Args:
+            session_id: The session ID
+            use_current: If True, load current.csv (may have transformations).
+                        If False, load original.csv (always unchanged).
+        """
+        if not self.session_has_file(session_id):
+            return None
+
+        session_dir = self.get_session_dir(session_id)
+
+        # Try current first, fall back to original
+        if use_current:
+            file_path = session_dir / "current.csv"
+            if not file_path.exists():
+                file_path = session_dir / "original.csv"
+        else:
+            file_path = session_dir / "original.csv"
+
+        if file_path.exists():
+            return pd.read_csv(file_path)
+        return None
+
+    def get_original_dataframe(self, session_id: str) -> Optional[pd.DataFrame]:
+        """Load the original (unmodified) CSV file."""
+        return self.get_dataframe(session_id, use_current=False)
+
+    def save_transformed_dataframe(self, session_id: str, df: pd.DataFrame) -> dict:
+        """
+        Save a transformed DataFrame as the new current version.
+        Original file remains unchanged.
+        Returns updated metadata.
+        """
+        if not self.session_has_file(session_id):
+            raise ValueError(f"Session {session_id} has no file")
+
+        session_dir = self.get_session_dir(session_id)
+        current_path = session_dir / "current.csv"
+
+        # Save transformed data
+        df.to_csv(current_path, index=False)
+
+        # Update metadata
+        metadata = {
+            "row_count": len(df),
+            "column_count": len(df.columns),
+            "columns": df.columns.tolist(),
+            "preview": df.head(5).to_dict(orient="records"),
+        }
+
+        # Update session info
+        session = self._sessions[session_id]
+        self._sessions[session_id] = SessionInfo(
+            session_id=session.session_id,
+            has_file=True,
+            filename=session.filename,
+            row_count=metadata["row_count"],
+            column_count=metadata["column_count"],
+            columns=metadata["columns"],
+            created_at=session.created_at,
+        )
+
+        self._save_session_to_disk(session_id)
+
+        return metadata
+
+    def reset_to_original(self, session_id: str) -> dict:
+        """
+        Reset current.csv back to original.csv.
+        Returns updated metadata.
+        """
+        if not self.session_has_file(session_id):
+            raise ValueError(f"Session {session_id} has no file")
+
+        session_dir = self.get_session_dir(session_id)
+        original_path = session_dir / "original.csv"
+        current_path = session_dir / "current.csv"
+
+        # Copy original to current
+        current_path.write_bytes(original_path.read_bytes())
+
+        # Reload and return metadata
+        df = pd.read_csv(current_path)
+
+        metadata = {
+            "row_count": len(df),
+            "column_count": len(df.columns),
+            "columns": df.columns.tolist(),
+            "preview": df.head(5).to_dict(orient="records"),
+        }
+
+        # Update session
+        session = self._sessions[session_id]
+        self._sessions[session_id] = SessionInfo(
+            session_id=session.session_id,
+            has_file=True,
+            filename=session.filename,
+            row_count=metadata["row_count"],
+            column_count=metadata["column_count"],
+            columns=metadata["columns"],
+            created_at=session.created_at,
+        )
+
+        self._save_session_to_disk(session_id)
+
+        return metadata
+
+    # ============ Chat History Persistence ============
+
+    def add_chat_message(
+        self,
+        session_id: str,
+        role: str,
+        text: str,
+        message_type: str = "text",
+        plot_path: Optional[str] = None,
+        plot_title: Optional[str] = None,
+    ) -> dict:
+        """
+        Add a message to chat history.
+
+        Args:
+            session_id: The session ID
+            role: "user" or "assistant" or "system"
+            text: Message text
+            message_type: "text", "plot", "error", etc.
+            plot_path: Optional path to plot image (for plot messages)
+            plot_title: Optional plot title (for plot messages)
+
+        Returns:
+            The saved message dict with id and timestamp
+        """
+        session_dir = self.get_session_dir(session_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        history_file = session_dir / "chat_history.json"
+
+        # Load existing history
+        history = []
+        if history_file.exists():
+            try:
+                history = json.loads(history_file.read_text(encoding="utf-8"))
+            except Exception:
+                history = []
+
+        # Create message
+        message = {
+            "id": len(history) + 1,
+            "role": role,
+            "text": text,
+            "type": message_type,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        # Add plot info if provided
+        if plot_path:
+            message["plot_path"] = plot_path
+        if plot_title:
+            message["plot_title"] = plot_title
+
+        history.append(message)
+
+        # Save
+        history_file.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        return message
+
+    def get_chat_history(self, session_id: str) -> list[dict]:
+        """Get all chat messages for a session."""
+        session_dir = self.get_session_dir(session_id)
+        history_file = session_dir / "chat_history.json"
+
+        if history_file.exists():
+            try:
+                return json.loads(history_file.read_text(encoding="utf-8"))
+            except Exception:
+                return []
+        return []
+
+    def clear_chat_history(self, session_id: str):
+        """Clear chat history for a session."""
+        session_dir = self.get_session_dir(session_id)
+        history_file = session_dir / "chat_history.json"
+        if history_file.exists():
+            history_file.unlink()
+
+    # ============ Plots Persistence ============
+
+    def add_plot(self, session_id: str, plot_data: dict) -> dict:
+        """
+        Add a plot to session.
+
+        Args:
+            session_id: The session ID
+            plot_data: Plot info dict (id, title, columns_used, summary, chart_data, etc.)
+
+        Returns:
+            The saved plot dict with timestamp
+        """
+        session_dir = self.get_session_dir(session_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        plots_file = session_dir / "plots.json"
+
+        # Load existing plots
+        plots = []
+        if plots_file.exists():
+            try:
+                plots = json.loads(plots_file.read_text(encoding="utf-8"))
+            except Exception:
+                plots = []
+
+        # Add timestamp
+        plot_data["timestamp"] = datetime.now().isoformat()
+
+        plots.append(plot_data)
+
+        # Save
+        plots_file.write_text(json.dumps(plots, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        return plot_data
+
+    def get_plots(self, session_id: str) -> list[dict]:
+        """Get all plots for a session."""
+        session_dir = self.get_session_dir(session_id)
+        plots_file = session_dir / "plots.json"
+
+        if plots_file.exists():
+            try:
+                return json.loads(plots_file.read_text(encoding="utf-8"))
+            except Exception:
+                return []
+        return []
+
+    def clear_plots(self, session_id: str):
+        """Clear plots for a session."""
+        session_dir = self.get_session_dir(session_id)
+        plots_file = session_dir / "plots.json"
+        if plots_file.exists():
+            plots_file.unlink()
+
+
+# Singleton instance
+_session_manager: Optional[SessionManager] = None
+
+
+def get_session_manager() -> SessionManager:
+    """Get or create the session manager singleton."""
+    global _session_manager
+    if _session_manager is None:
+        from backend.config import get_settings
+        settings = get_settings()
+        _session_manager = SessionManager(settings.data_dir)
+    return _session_manager
