@@ -13,7 +13,7 @@ class ToolName(str, Enum):
 class ToolCall(BaseModel):
     """Represents a tool call from the LLM."""
     id: str
-    name: ToolName
+    name: str
     input: dict[str, Any]
 
 
@@ -26,7 +26,7 @@ class ToolResult(BaseModel):
 
 class ChatEvent(BaseModel):
     """Event sent to frontend via SSE."""
-    event_type: str  # "text", "query_result", "plot", "error", "done"
+    event_type: str  # "text", "query_result", "plot", "error", "done", "status"
     data: dict[str, Any]
 
 
@@ -40,14 +40,21 @@ class PlotConfig(BaseModel):
     aggregation: Optional[str] = None
 
 
+class ChartConfig(BaseModel):
+    """Configuration for rendering a chart on frontend."""
+    chart_type: str  # bar, line, area, pie, scatter, histogram
+    x_key: str
+    y_key: str
+    color_key: Optional[str] = None
+
+
 class PlotInfo(BaseModel):
     """Information about a created plot."""
     id: str
-    path: str
     title: str
     columns_used: str
     summary: Optional[str] = None
-    insights: Optional[str] = None
+    chart_config: Optional[ChartConfig] = None
     chart_data: Optional[list[dict]] = None
 
 

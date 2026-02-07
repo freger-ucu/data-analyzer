@@ -101,7 +101,7 @@ Examples of good visualizations:
 
         Args:
             intent: What the user wants to do with the data
-            data_summary: Output from DataSummarizer.summarize_for_query()
+            data_summary: Summary of the DataFrame schema and stats
             context: Optional additional context (e.g., previous results)
 
         Returns:

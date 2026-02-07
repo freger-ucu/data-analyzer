@@ -7,7 +7,6 @@ from backend.models.schemas import (
     SessionStatusResponse,
 )
 from backend.models.planner_models import ChatRequest, ChatResponse
-from backend.agents.data_summarizer import DataSummarizer
 from backend.agents.query_maker import QueryMaker
 from backend.agents.planner import PlannerAgent
 from backend.llm.anthropic_llm import AnthropicLLM
@@ -15,8 +14,59 @@ from backend.llm.mock_llm import MockLLM
 from backend.config import get_settings, Settings
 from backend.services.session_manager import get_session_manager, SessionManager
 from backend.services.query_executor import get_query_executor, QueryExecutor
+import pandas as pd
 
 router = APIRouter()
+
+
+def _summarize_for_query(df: pd.DataFrame) -> str:
+    """Generate a minimal summary optimized for query generation."""
+    lines = []
+    lines.append("DataFrame info:")
+    lines.append(f"- Shape: {df.shape[0]} rows x {df.shape[1]} columns")
+    lines.append("")
+    lines.append("Columns:")
+
+    for col in df.columns:
+        dtype = str(df[col].dtype)
+        if pd.api.types.is_numeric_dtype(df[col]):
+            min_val = df[col].min()
+            max_val = df[col].max()
+            lines.append(f"  - {col} ({dtype}): range [{min_val} to {max_val}]")
+        elif pd.api.types.is_categorical_dtype(df[col]) or df[col].nunique() <= 10:
+            categories = df[col].dropna().unique().tolist()[:10]
+            lines.append(f"  - {col} ({dtype}): categories {categories}")
+        else:
+            sample = str(df[col].dropna().iloc[0])[:30] if len(df[col].dropna()) > 0 else "N/A"
+            lines.append(f"  - {col} ({dtype}): e.g. \"{sample}\"")
+
+    return "\n".join(lines)
+
+
+def _summarize_basic(df: pd.DataFrame, filename: str) -> str:
+    """Generate a basic markdown summary."""
+    lines = []
+    lines.append(f"# Data Summary: {filename}")
+    lines.append("")
+    lines.append("## Overview")
+    lines.append(f"- **Rows:** {len(df):,}")
+    lines.append(f"- **Columns:** {len(df.columns)}")
+    lines.append("")
+    lines.append("## Schema")
+    lines.append("| Column | Type | Non-Null | Unique |")
+    lines.append("|--------|------|----------|--------|")
+
+    for col in df.columns:
+        dtype = str(df[col].dtype)
+        non_null = df[col].notna().sum()
+        unique = df[col].nunique()
+        lines.append(f"| {col} | {dtype} | {non_null:,} | {unique:,} |")
+
+    lines.append("")
+    lines.append("## Sample Data (first 5 rows)")
+    lines.append(df.head(5).to_markdown(index=False))
+
+    return "\n".join(lines)
 
 
 def get_llm(settings: Settings = Depends(get_settings)):
@@ -102,16 +152,70 @@ async def get_data_summary(
     session = session_mgr.get_session(session_id)
     filename = session.filename if session else "data.csv"
 
-    summarizer = DataSummarizer(llm=llm if mode == "enhanced" else None)
-
     if mode == "query":
-        summary = summarizer.summarize_for_query(df)
-    elif mode == "enhanced":
-        summary = await summarizer.summarize_enhanced(df, filename)
+        summary = _summarize_for_query(df)
     else:
-        summary = summarizer.summarize_basic(df, filename)
+        summary = _summarize_basic(df, filename)
 
     return {"summary": summary, "mode": mode}
+
+
+# ============ Suggestions Endpoint ============
+
+def _generate_suggestions(df: pd.DataFrame) -> list[dict]:
+    """Generate heuristic prompt suggestions based on DataFrame schema."""
+    suggestions = []
+
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    categorical_cols = [
+        c for c in df.select_dtypes(exclude=["number"]).columns
+        if df[c].nunique() <= 20
+    ]
+
+    if numeric_cols:
+        suggestions.append({
+            "text": f"What are the key statistics for {numeric_cols[0]}?",
+            "category": "analysis",
+        })
+
+    if categorical_cols and numeric_cols:
+        suggestions.append({
+            "text": f"Show a bar chart of {numeric_cols[0]} by {categorical_cols[0]}",
+            "category": "visualization",
+        })
+
+    if len(numeric_cols) > 1:
+        suggestions.append({
+            "text": f"Show the distribution of {numeric_cols[-1]}",
+            "category": "visualization",
+        })
+
+    suggestions.append({
+        "text": "Are there any missing values in the data?",
+        "category": "analysis",
+    })
+
+    return suggestions[:4]
+
+
+@router.get("/suggestions/{session_id}")
+async def get_suggestions(
+    session_id: str,
+    session_mgr: SessionManager = Depends(get_session_manager),
+):
+    """Generate smart prompt suggestions based on the uploaded data."""
+    df = session_mgr.get_dataframe(session_id)
+    if df is None:
+        raise HTTPException(status_code=404, detail="No data found for this session")
+
+    session = session_mgr.get_session(session_id)
+    filename = session.filename if session else "data.csv"
+
+    suggestions = _generate_suggestions(df)
+    return {
+        "filename": filename,
+        "suggestions": suggestions,
+    }
 
 
 # ============ Query Endpoint ============
@@ -135,8 +239,7 @@ async def generate_and_execute_query(
         raise HTTPException(status_code=404, detail="No data found for this session")
 
     # Get data summary for query generation
-    summarizer = DataSummarizer()
-    data_summary = summarizer.summarize_for_query(df)
+    data_summary = _summarize_for_query(df)
 
     # Generate query
     query_maker = QueryMaker(llm)
@@ -175,7 +278,7 @@ async def generate_and_execute_query(
 @router.get("/preview/{session_id}")
 async def get_data_preview(
     session_id: str,
-    rows: int = 5,
+    rows: int = 100,
     version: str = "current",  # "current" or "original"
     session_mgr: SessionManager = Depends(get_session_manager),
 ):
@@ -322,7 +425,6 @@ async def chat(
 
     # Initialize components
     query_maker = QueryMaker(llm)
-    data_summarizer = DataSummarizer()
 
     # Create planner with all dependencies
     # Planner validates results itself through its tool-use loop
@@ -330,31 +432,40 @@ async def chat(
         llm=llm,
         query_maker=query_maker,
         query_executor=executor,
-        data_summarizer=data_summarizer,
     )
+
+    print(f"[Routes] /chat called: session={request.session_id}, message='{request.message[:50]}...'", flush=True)
 
     if request.stream:
         # SSE streaming response
         async def event_generator():
+            print(f"[Routes] SSE generator started", flush=True)
             new_df = None
             data_updated = False
 
-            async for event in planner.run(
-                user_message=request.message,
-                df=df,
-                filename=session.filename,
-                session_id=request.session_id,
-                session_mgr=session_mgr,
-            ):
-                # Check for data updates in done event
-                if event.event_type == "done":
-                    data_updated = event.data.get("data_updated", False)
-                    new_df = event.data.get("new_df")
-                    # Don't include new_df in the SSE event
-                    event_data = {k: v for k, v in event.data.items() if k != "new_df"}
-                    yield f"event: {event.event_type}\ndata: {json.dumps(event_data)}\n\n"
-                else:
-                    yield f"event: {event.event_type}\ndata: {json.dumps(event.data)}\n\n"
+            try:
+                async for event in planner.run(
+                    user_message=request.message,
+                    df=df,
+                    filename=session.filename,
+                    session_id=request.session_id,
+                    session_mgr=session_mgr,
+                ):
+                    print(f"[Routes] Got event: {event.event_type}", flush=True)
+                    # Check for data updates in done event
+                    if event.event_type == "done":
+                        data_updated = event.data.get("data_updated", False)
+                        new_df = event.data.get("new_df")
+                        # Don't include new_df in the SSE event
+                        event_data = {k: v for k, v in event.data.items() if k != "new_df"}
+                        yield f"event: {event.event_type}\ndata: {json.dumps(event_data)}\n\n"
+                    else:
+                        yield f"event: {event.event_type}\ndata: {json.dumps(event.data)}\n\n"
+            except Exception as e:
+                import traceback
+                print(f"[Routes] SSE generator error: {e}", flush=True)
+                traceback.print_exc()
+                yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
 
             # Save updated DataFrame if changed
             if data_updated and new_df is not None:
@@ -513,8 +624,7 @@ async def test_generated_plot(
     try:
         # Step 1: Generate plot code via QueryMaker
         results["steps"].append("Generating plot code via QueryMaker...")
-        summarizer = DataSummarizer()
-        data_summary = summarizer.summarize_for_query(df)
+        data_summary = _summarize_for_query(df)
         results["data_summary"] = data_summary[:500]
 
         query_maker = QueryMaker(llm)

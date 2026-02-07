@@ -35,6 +35,78 @@ export function MarkdownLatex({ children, className }: MarkdownLatexProps) {
   );
 }
 
+function renderMarkdownTable(tableText: string): React.ReactNode {
+  const lines = tableText.trim().split("\n").filter((l) => l.trim());
+  if (lines.length < 2) return <span>{tableText}</span>;
+
+  const parseCells = (line: string) =>
+    line.split("|").filter((c) => c.trim()).map((c) => c.trim());
+
+  const headerCells = parseCells(lines[0]);
+  // Skip separator line (contains ---)
+  const dataLines = lines.slice(2);
+  const rows = dataLines.map(parseCells);
+
+  return (
+    <div className="my-2 overflow-x-auto" style={{ maxWidth: "100%" }}>
+      <table
+        style={{
+          borderCollapse: "collapse",
+          fontSize: "12px",
+          width: "100%",
+          minWidth: "max-content",
+        }}
+      >
+        <thead>
+          <tr>
+            {headerCells.map((cell, i) => (
+              <th
+                key={i}
+                style={{
+                  padding: "6px 10px",
+                  borderBottom: "1px solid rgba(147,51,234,0.25)",
+                  textAlign: "left",
+                  fontWeight: 600,
+                  color: "#e4e4e7",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {cell}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, ri) => (
+            <tr key={ri}>
+              {row.map((cell, ci) => (
+                <td
+                  key={ci}
+                  style={{
+                    padding: "4px 10px",
+                    borderBottom: "1px solid rgba(147,51,234,0.1)",
+                    color: "#e4e4e7",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function isMarkdownTable(text: string): boolean {
+  const lines = text.trim().split("\n");
+  if (lines.length < 2) return false;
+  // Must have at least a header row and a separator row with ---
+  return lines[0].includes("|") && lines.some((l) => /^\|?\s*[-:]+\s*\|/.test(l));
+}
+
 function parseContent(text: string): React.ReactNode[] {
   const elements: React.ReactNode[] = [];
 
@@ -55,8 +127,29 @@ function parseContent(text: string): React.ReactNode[] {
         elements.push(<code className="text-red-500">{part}</code>);
       }
     } else {
-      // Parse inline math and markdown
-      elements.push(...parseInlineContent(part));
+      // Split out markdown tables from inline content
+      const tableRegex = /((?:^|\n)\|[^\n]+\|\n\|[-:| ]+\|\n(?:\|[^\n]+\|\n?)*)/g;
+      let lastIdx = 0;
+      let tableMatch;
+
+      while ((tableMatch = tableRegex.exec(part)) !== null) {
+        // Text before table
+        if (tableMatch.index > lastIdx) {
+          elements.push(...parseInlineContent(part.slice(lastIdx, tableMatch.index)));
+        }
+        // Render table
+        if (isMarkdownTable(tableMatch[1])) {
+          elements.push(renderMarkdownTable(tableMatch[1]));
+        } else {
+          elements.push(...parseInlineContent(tableMatch[1]));
+        }
+        lastIdx = tableMatch.index + tableMatch[0].length;
+      }
+
+      // Remaining text after last table
+      if (lastIdx < part.length) {
+        elements.push(...parseInlineContent(part.slice(lastIdx)));
+      }
     }
   }
 

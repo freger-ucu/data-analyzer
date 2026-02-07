@@ -162,7 +162,7 @@ class SessionManager:
             "row_count": len(df),
             "column_count": len(df.columns),
             "columns": df.columns.tolist(),
-            "preview": df.head(5).to_dict(orient="records"),
+            "preview": df.head(100).to_dict(orient="records"),
         }
 
         # Update session
@@ -231,7 +231,7 @@ class SessionManager:
             "row_count": len(df),
             "column_count": len(df.columns),
             "columns": df.columns.tolist(),
-            "preview": df.head(5).to_dict(orient="records"),
+            "preview": df.head(100).to_dict(orient="records"),
         }
 
         # Update session info
@@ -272,7 +272,7 @@ class SessionManager:
             "row_count": len(df),
             "column_count": len(df.columns),
             "columns": df.columns.tolist(),
-            "preview": df.head(5).to_dict(orient="records"),
+            "preview": df.head(100).to_dict(orient="records"),
         }
 
         # Update session
@@ -301,6 +301,7 @@ class SessionManager:
         message_type: str = "text",
         plot_path: Optional[str] = None,
         plot_title: Optional[str] = None,
+        plot_data: Optional[dict] = None,
     ) -> dict:
         """
         Add a message to chat history.
@@ -312,6 +313,7 @@ class SessionManager:
             message_type: "text", "plot", "error", etc.
             plot_path: Optional path to plot image (for plot messages)
             plot_title: Optional plot title (for plot messages)
+            plot_data: Optional plot data with chart_config and chart_data
 
         Returns:
             The saved message dict with id and timestamp
@@ -342,6 +344,8 @@ class SessionManager:
             message["plot_path"] = plot_path
         if plot_title:
             message["plot_title"] = plot_title
+        if plot_data:
+            message["plot_data"] = plot_data
 
         history.append(message)
 
@@ -422,6 +426,137 @@ class SessionManager:
         plots_file = session_dir / "plots.json"
         if plots_file.exists():
             plots_file.unlink()
+
+    # ============ Query History Persistence ============
+
+    def add_query(
+        self,
+        session_id: str,
+        intent: str,
+        code: str,
+        success: bool,
+        result_type: str,
+        result_preview: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> dict:
+        """
+        Save an executed query for audit/debug purposes.
+
+        Args:
+            session_id: The session ID
+            intent: What user wanted to do
+            code: Generated pandas code
+            success: Whether execution succeeded
+            result_type: Type of result (dataframe, value, etc.)
+            result_preview: Preview of the result
+            error: Error message if failed
+
+        Returns:
+            The saved query dict with timestamp
+        """
+        session_dir = self.get_session_dir(session_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        queries_file = session_dir / "queries.json"
+
+        # Load existing queries
+        queries = []
+        if queries_file.exists():
+            try:
+                queries = json.loads(queries_file.read_text(encoding="utf-8"))
+            except Exception:
+                queries = []
+
+        # Create query record
+        query_record = {
+            "id": len(queries) + 1,
+            "intent": intent,
+            "code": code,
+            "success": success,
+            "result_type": result_type,
+            "result_preview": result_preview,
+            "error": error,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        queries.append(query_record)
+
+        # Save (keep last 100 queries to avoid file bloat)
+        if len(queries) > 100:
+            queries = queries[-100:]
+
+        queries_file.write_text(json.dumps(queries, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        return query_record
+
+    def get_queries(self, session_id: str, limit: int = 50) -> list[dict]:
+        """Get query history for a session."""
+        session_dir = self.get_session_dir(session_id)
+        queries_file = session_dir / "queries.json"
+
+        if queries_file.exists():
+            try:
+                queries = json.loads(queries_file.read_text(encoding="utf-8"))
+                return queries[-limit:]  # Return last N queries
+            except Exception:
+                return []
+        return []
+
+    # ============ Data Summary Caching ============
+
+    def save_data_summary(self, session_id: str, summary: str, version: str = "current"):
+        """
+        Cache data summary to avoid regenerating it.
+
+        Args:
+            session_id: The session ID
+            summary: The generated data summary text
+            version: "current" or "original"
+        """
+        session_dir = self.get_session_dir(session_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = session_dir / f"summary_{version}.txt"
+        cache_file.write_text(summary, encoding="utf-8")
+
+    def get_data_summary(self, session_id: str, version: str = "current") -> Optional[str]:
+        """
+        Get cached data summary if available.
+
+        Args:
+            session_id: The session ID
+            version: "current" or "original"
+
+        Returns:
+            Cached summary or None if not cached
+        """
+        session_dir = self.get_session_dir(session_id)
+        cache_file = session_dir / f"summary_{version}.txt"
+
+        if cache_file.exists():
+            try:
+                return cache_file.read_text(encoding="utf-8")
+            except Exception:
+                return None
+        return None
+
+    def invalidate_data_summary(self, session_id: str, version: str = "current"):
+        """
+        Invalidate cached summary (call after data transformation).
+
+        Args:
+            session_id: The session ID
+            version: "current" or "original" or "all"
+        """
+        session_dir = self.get_session_dir(session_id)
+
+        if version == "all":
+            for v in ["current", "original"]:
+                cache_file = session_dir / f"summary_{v}.txt"
+                if cache_file.exists():
+                    cache_file.unlink()
+        else:
+            cache_file = session_dir / f"summary_{version}.txt"
+            if cache_file.exists():
+                cache_file.unlink()
 
 
 # Singleton instance

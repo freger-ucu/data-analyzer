@@ -8,23 +8,27 @@ Responsibilities:
 4. Executes code via QueryExecutor
 5. Streams events to frontend
 """
-import os
 import uuid
 from typing import AsyncGenerator, Optional, TYPE_CHECKING
 from pathlib import Path
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
 from backend.llm.anthropic_llm import AnthropicLLM, PLANNER_TOOLS
 from backend.agents.query_maker import QueryMaker
-from backend.agents.data_summarizer import DataSummarizer
 from backend.services.query_executor import QueryExecutor
 from backend.models.planner_models import ChatEvent, ToolCall, PlotInfo
 
 if TYPE_CHECKING:
     from backend.services.session_manager import SessionManager
+
+
+def safe_print(msg: str, **kwargs) -> None:
+    """Print message safely, handling Unicode encoding errors on Windows."""
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        # Replace problematic characters and retry
+        print(msg.encode('ascii', errors='replace').decode('ascii'), flush=True)
 
 
 class PlannerAgent:
@@ -41,14 +45,10 @@ class PlannerAgent:
         llm: AnthropicLLM,
         query_maker: QueryMaker,
         query_executor: QueryExecutor,
-        data_summarizer: DataSummarizer,
-        plots_dir: str = "data/plots"
     ):
         self.llm = llm
         self.query_maker = query_maker
         self.query_executor = query_executor
-        self.data_summarizer = data_summarizer
-        self.plots_dir = plots_dir
         self.system_prompt = self._load_system_prompt()
 
     def _load_system_prompt(self) -> str:
@@ -106,6 +106,35 @@ Guidelines:
 
         return "\n".join(lines)
 
+    def _summarize_for_query(self, df: pd.DataFrame) -> str:
+        """
+        Generate a minimal summary optimized for query generation.
+        Very token-efficient - just what's needed to write pandas code.
+        """
+        lines = []
+
+        lines.append("DataFrame info:")
+        lines.append(f"- Shape: {df.shape[0]} rows x {df.shape[1]} columns")
+        lines.append("")
+        lines.append("Columns:")
+
+        for col in df.columns:
+            dtype = str(df[col].dtype)
+
+            # Add range/categories for better query context
+            if pd.api.types.is_numeric_dtype(df[col]):
+                min_val = df[col].min()
+                max_val = df[col].max()
+                lines.append(f"  - {col} ({dtype}): range [{min_val} to {max_val}]")
+            elif pd.api.types.is_categorical_dtype(df[col]) or df[col].nunique() <= 10:
+                categories = df[col].dropna().unique().tolist()[:10]
+                lines.append(f"  - {col} ({dtype}): categories {categories}")
+            else:
+                sample = str(df[col].dropna().iloc[0])[:30] if len(df[col].dropna()) > 0 else "N/A"
+                lines.append(f"  - {col} ({dtype}): e.g. \"{sample}\"")
+
+        return "\n".join(lines)
+
     async def run(
         self,
         user_message: str,
@@ -119,6 +148,12 @@ Guidelines:
 
         Yields ChatEvent objects as the agent processes the request.
         """
+        import sys
+        safe_print(f"[Planner] === RUN STARTED ===", flush=True)
+        safe_print(f"[Planner] Message: '{user_message[:80]}...'", flush=True)
+        safe_print(f"[Planner] DataFrame: {df.shape}", flush=True)
+        sys.stdout.flush()
+
         # State for this run
         current_df = df.copy()
         chat_messages: list[str] = []
@@ -146,14 +181,25 @@ Use the available tools to fulfill this request. Always call finish() when done.
         while iteration < self.MAX_ITERATIONS and not finished:
             iteration += 1
 
+            # Emit status update
+            if iteration == 1:
+                yield ChatEvent(event_type="status", data={"message": "Analyzing request..."})
+            else:
+                yield ChatEvent(event_type="status", data={"message": "Planning next step..."})
+
             # Call LLM with tools
             try:
+                safe_print(f"[Planner] Iteration {iteration}: calling LLM...", flush=True)
                 response = await self.llm.generate_with_tools(
                     messages=messages,
                     tools=PLANNER_TOOLS,
                     system=self.system_prompt,
                 )
+                safe_print(f"[Planner] LLM responded with {len(response.content)} blocks, stop_reason={response.stop_reason}", flush=True)
             except Exception as e:
+                import traceback
+                safe_print(f"[Planner] LLM error: {e}")
+                traceback.print_exc()
                 yield ChatEvent(
                     event_type="error",
                     data={"message": f"LLM error: {str(e)}"}
@@ -165,10 +211,13 @@ Use the available tools to fulfill this request. Always call finish() when done.
             tool_calls = []
 
             for block in response.content:
+                safe_print(f"[Planner] Processing block: type={block.type}")
                 if block.type == "text":
                     assistant_content.append({"type": "text", "text": block.text})
+                    safe_print(f"[Planner] Text block: {block.text[:100]}...")
 
                 elif block.type == "tool_use":
+                    safe_print(f"[Planner] Tool call: {block.name} with input: {block.input}")
                     assistant_content.append({
                         "type": "tool_use",
                         "id": block.id,
@@ -192,6 +241,17 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 tool_results = []
 
                 for tool_call in tool_calls:
+                    # Emit status updates for long operations
+                    if tool_call.name == "generate_query":
+                        yield ChatEvent(event_type="status", data={"message": "Generating code..."})
+                    elif tool_call.name == "create_plot":
+                        yield ChatEvent(event_type="status", data={"message": "Creating visualization..."})
+                        plot_title = tool_call.input.get("title", "chart")
+                        yield ChatEvent(
+                            event_type="plot_creating",
+                            data={"title": plot_title}
+                        )
+
                     # Execute tool
                     result = await self._execute_tool(
                         name=tool_call.name,
@@ -228,6 +288,8 @@ Use the available tools to fulfill this request. Always call finish() when done.
                             data={"text": tool_call.input.get("text", "")}
                         )
                     elif tool_call.name == "generate_query":
+                        if result.get("is_error"):
+                            yield ChatEvent(event_type="status", data={"message": "Retrying with a different approach..."})
                         yield ChatEvent(
                             event_type="query_result",
                             data={
@@ -243,23 +305,29 @@ Use the available tools to fulfill this request. Always call finish() when done.
                                 data={"text": result["transformation_summary"]}
                             )
                     elif tool_call.name == "create_plot":
+                        safe_print(f"[Planner] create_plot result: is_error={result.get('is_error')}, has_plot_info={result.get('plot_info') is not None}")
                         if not result.get("is_error") and result.get("plot_info"):
                             plot = result["plot_info"]
+                            safe_print(f"[Planner] Yielding plot event: id={plot.id}, title={plot.title}, chart_data_len={len(plot.chart_data) if plot.chart_data else 0}")
                             yield ChatEvent(
                                 event_type="plot",
                                 data={
                                     "id": plot.id,
                                     "title": plot.title,
-                                    "path": plot.path,
                                     "columns_used": plot.columns_used,
                                     "summary": plot.summary,
+                                    "chart_config": plot.chart_config.model_dump() if plot.chart_config else None,
+                                    "chart_data": plot.chart_data,
                                 }
                             )
                         elif result.get("is_error"):
+                            safe_print(f"[Planner] create_plot error: {result['content']}")
                             yield ChatEvent(
                                 event_type="error",
                                 data={"message": result["content"]}
                             )
+                        else:
+                            safe_print(f"[Planner] create_plot: no error but no plot_info! Full result: {result}")
 
                 # Add tool results to messages
                 messages.append({
@@ -269,6 +337,17 @@ Use the available tools to fulfill this request. Always call finish() when done.
 
             # Check for stop condition
             if response.stop_reason == "end_turn" and not tool_calls:
+                # If LLM returned text without tools, yield that text to user
+                for block in response.content:
+                    if block.type == "text" and block.text.strip():
+                        yield ChatEvent(
+                            event_type="text",
+                            data={"text": block.text}
+                        )
+                        chat_messages.append(block.text)
+                        # Save to chat history
+                        if session_mgr:
+                            session_mgr.add_chat_message(session_id, "assistant", block.text)
                 break
 
         # Yield done event
@@ -300,7 +379,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 input, session_id, session_mgr, chat_messages
             )
         elif name == "generate_query":
-            return await self._handle_generate_query(input, df)
+            return await self._handle_generate_query(input, df, session_id, session_mgr)
         elif name == "create_plot":
             return await self._handle_create_plot(
                 input, df, session_id, session_mgr, plots
@@ -326,7 +405,13 @@ Use the available tools to fulfill this request. Always call finish() when done.
 
         return {"content": "Message sent to user."}
 
-    async def _handle_generate_query(self, input: dict, df: pd.DataFrame) -> dict:
+    async def _handle_generate_query(
+        self,
+        input: dict,
+        df: pd.DataFrame,
+        session_id: str,
+        session_mgr: Optional["SessionManager"],
+    ) -> dict:
         """Generate and execute a pandas query via QueryMaker.
 
         The Planner validates results through its tool-use loop - if the result
@@ -334,14 +419,34 @@ Use the available tools to fulfill this request. Always call finish() when done.
         """
         intent = input.get("intent", "")
 
-        # Get data summary for context
-        data_summary = self.data_summarizer.summarize_for_query(df)
+        # Try to get cached data summary, generate if not available
+        data_summary = None
+        if session_mgr:
+            data_summary = session_mgr.get_data_summary(session_id, version="current")
+
+        if not data_summary:
+            data_summary = self._summarize_for_query(df)
+            # Cache the summary for future use
+            if session_mgr:
+                session_mgr.save_data_summary(session_id, data_summary, version="current")
 
         # Delegate to QueryMaker
         generated = await self.query_maker.generate_query(intent, data_summary)
 
         # Execute code
         result = self.query_executor.execute(generated.code, df)
+
+        # Save query for audit/debug
+        if session_mgr:
+            session_mgr.add_query(
+                session_id=session_id,
+                intent=intent,
+                code=generated.code,
+                success=result.success,
+                result_type=result.result_type,
+                result_preview=result.result_preview[:500] if result.result_preview else None,
+                error=result.error[:500] if result.error else None,
+            )
 
         if result.success:
             response = {
@@ -357,6 +462,10 @@ Use the available tools to fulfill this request. Always call finish() when done.
             if result.result_type == "dataframe":
                 new_df = result.result
                 response["new_df"] = new_df
+
+                # Invalidate cached summary since data changed
+                if session_mgr:
+                    session_mgr.invalidate_data_summary(session_id, version="current")
 
                 # Build detailed data change summary
                 old_shape = df.shape
@@ -382,18 +491,18 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 response["content"] += f"\n\nDATA CHANGES:\n" + "\n".join(change_info)
 
                 # Build user-friendly transformation summary
-                summary_parts = ["✅ **Дані оновлено**"]
+                summary_parts = ["**Data updated**"]
                 if removed_cols:
-                    summary_parts.append(f"Видалено: {', '.join(removed_cols)}")
+                    summary_parts.append(f"Removed: {', '.join(removed_cols)}")
                 if added_cols:
-                    summary_parts.append(f"Додано: {', '.join(added_cols)}")
+                    summary_parts.append(f"Added: {', '.join(added_cols)}")
                 if new_shape[0] != old_shape[0]:
                     diff = new_shape[0] - old_shape[0]
                     if diff > 0:
-                        summary_parts.append(f"+{diff} рядків")
+                        summary_parts.append(f"+{diff} rows")
                     else:
-                        summary_parts.append(f"{diff} рядків")
-                summary_parts.append(f"📊 {new_shape[0]} рядків × {new_shape[1]} колонок")
+                        summary_parts.append(f"{diff} rows")
+                summary_parts.append(f"{new_shape[0]} rows x {new_shape[1]} columns")
                 response["transformation_summary"] = " | ".join(summary_parts)
 
             return response
@@ -411,78 +520,232 @@ Use the available tools to fulfill this request. Always call finish() when done.
         session_mgr: Optional["SessionManager"],
         plots: list[PlotInfo],
     ) -> dict:
-        """Create a plot by delegating code generation to QueryMaker."""
+        """Create a plot by preparing chart data for frontend rendering."""
+        from backend.models.planner_models import ChartConfig
+
+        safe_print(f"[Planner] _handle_create_plot called with input: {input}")
+        safe_print(f"[Planner] DataFrame shape: {df.shape}, columns: {list(df.columns)}")
+
         plot_type = input.get("plot_type", "bar")
         title = input.get("title", "Plot")
+        x_column = input.get("x_column")
+        y_column = input.get("y_column")
+        color_column = input.get("color_column")
+        aggregation = input.get("aggregation", "sum")
 
         try:
-            # Get data summary for context
-            data_summary = self.data_summarizer.summarize_for_query(df)
+            # Auto-detect columns if not provided
+            numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+            categorical_cols = df.select_dtypes(exclude=['number']).columns.tolist()
 
-            # Delegate code generation to QueryMaker
-            generated = await self.query_maker.generate_plot_code(
+            if not x_column:
+                x_column = categorical_cols[0] if categorical_cols else df.columns[0]
+            if not y_column:
+                y_column = numeric_cols[0] if numeric_cols else df.columns[1] if len(df.columns) > 1 else df.columns[0]
+
+            # Prepare chart data based on plot type
+            safe_print(f"[Planner] Preparing chart data: type={plot_type}, x={x_column}, y={y_column}")
+            chart_data = self._prepare_chart_data(
+                df=df,
                 plot_type=plot_type,
-                data_summary=data_summary,
-                title=title,
-                x_column=input.get("x_column"),
-                y_column=input.get("y_column"),
-                color_column=input.get("color_column"),
-                aggregation=input.get("aggregation"),
-                custom_instructions=input.get("instructions"),
+                x_column=x_column,
+                y_column=y_column,
+                color_column=color_column,
+                aggregation=aggregation,
             )
+            safe_print(f"[Planner] chart_data result: {len(chart_data) if chart_data else 0} data points")
 
-            # Execute the generated plot code
-            result = self.query_executor.execute(generated.code, df)
-
-            if result.success and result.result_type == "figure":
-                # Save figure as SVG
-                plot_id = str(uuid.uuid4())[:8]
-                plot_dir = os.path.join(self.plots_dir, session_id)
-                os.makedirs(plot_dir, exist_ok=True)
-                plot_path = os.path.join(plot_dir, f"{plot_id}.svg")
-
-                result.result.savefig(plot_path, format='svg', bbox_inches='tight')
-                plt.close(result.result)
-
-                plot_info = PlotInfo(
-                    id=plot_id,
-                    path=plot_path,
-                    title=generated.title,
-                    columns_used=", ".join(generated.columns_used),
-                    summary=generated.summary,
-                )
-                plots.append(plot_info)
-
-                # Persist to session
-                if session_mgr:
-                    session_mgr.add_plot(session_id, plot_info.model_dump())
-                    # Also save as chat message with plot path
-                    session_mgr.add_chat_message(
-                        session_id=session_id,
-                        role="system",
-                        text=f"📊 {generated.title}",
-                        message_type="plot",
-                        plot_path=plot_path,
-                        plot_title=generated.title,
-                    )
-
+            if not chart_data:
+                print("[Planner] ERROR: No chart data generated!")
                 return {
-                    "content": (
-                        f"Plot created: {generated.title}\n"
-                        f"Type: {plot_type}\n"
-                        f"Columns: {', '.join(generated.columns_used)}\n"
-                        f"Summary: {generated.summary}"
-                    ),
-                    "plot_info": plot_info,
-                }
-            else:
-                return {
-                    "content": f"Plot creation failed: {result.error or 'No figure generated'}\nGenerated code:\n{generated.code}",
+                    "content": "Failed to prepare chart data: no data points generated",
                     "is_error": True
                 }
 
-        except Exception as e:
+            # Create chart config
+            chart_config = ChartConfig(
+                chart_type=plot_type,
+                x_key=x_column,
+                y_key=y_column,
+                color_key=color_column,
+            )
+
+            # Create plot info
+            plot_id = str(uuid.uuid4())[:8]
+            columns_used = [x_column, y_column]
+            if color_column:
+                columns_used.append(color_column)
+
+            # Generate summary
+            summary = self._generate_chart_summary(df, x_column, y_column, aggregation)
+
+            plot_info = PlotInfo(
+                id=plot_id,
+                title=title,
+                columns_used=", ".join(columns_used),
+                summary=summary,
+                chart_config=chart_config,
+                chart_data=chart_data,
+            )
+            plots.append(plot_info)
+
+            # Persist to session
+            if session_mgr:
+                session_mgr.add_plot(session_id, plot_info.model_dump())
+                try:
+                    session_mgr.add_chat_message(
+                        session_id=session_id,
+                        role="system",
+                        text=title,
+                        message_type="plot",
+                        plot_title=title,
+                        plot_data={
+                            "chart_config": chart_config.model_dump(),
+                            "chart_data": chart_data,
+                        },
+                    )
+                except Exception as e:
+                    import traceback
+                    safe_print(f"[Planner] Failed to save plot chat message: {e}")
+                    traceback.print_exc()
+
+            safe_print(f"[Planner] Plot created successfully: {title}, {len(chart_data)} points")
             return {
-                "content": f"Plot creation error: {str(e)}",
+                "content": (
+                    f"Plot created: {title}\n"
+                    f"Type: {plot_type}\n"
+                    f"Columns: {', '.join(columns_used)}\n"
+                    f"Data points: {len(chart_data)}"
+                ),
+                "plot_info": plot_info,
+            }
+
+        except Exception as e:
+            import traceback
+            safe_print(f"[Planner] Plot creation EXCEPTION: {e}")
+            traceback.print_exc()
+            return {
+                "content": f"Plot creation error: {str(e)}\n{traceback.format_exc()}",
                 "is_error": True
             }
+
+    def _prepare_chart_data(
+        self,
+        df: pd.DataFrame,
+        plot_type: str,
+        x_column: str,
+        y_column: str,
+        color_column: Optional[str],
+        aggregation: str,
+    ) -> list[dict]:
+        """Prepare chart data by aggregating DataFrame."""
+        import numpy as np
+
+        safe_print(f"[Planner] _prepare_chart_data: plot_type={plot_type}, x={x_column}, y={y_column}")
+        safe_print(f"[Planner] DataFrame columns: {list(df.columns)}")
+        safe_print(f"[Planner] x_column in df: {x_column in df.columns if x_column else 'N/A'}")
+        safe_print(f"[Planner] y_column in df: {y_column in df.columns if y_column else 'N/A'}")
+
+        try:
+            # Handle different plot types
+            if plot_type == "histogram":
+                # For histogram, bin the data
+                if pd.api.types.is_numeric_dtype(df[x_column]):
+                    counts, bin_edges = np.histogram(df[x_column].dropna(), bins=20)
+                    return [
+                        {x_column: f"{bin_edges[i]:.1f}-{bin_edges[i+1]:.1f}", "count": int(counts[i])}
+                        for i in range(len(counts))
+                    ]
+                else:
+                    # Categorical histogram = value counts
+                    value_counts = df[x_column].value_counts().head(20)
+                    return [
+                        {x_column: str(idx), "count": int(val)}
+                        for idx, val in value_counts.items()
+                    ]
+
+            elif plot_type == "pie":
+                # For pie, aggregate by x_column
+                if pd.api.types.is_numeric_dtype(df[y_column]):
+                    agg_func = self._get_agg_func(aggregation)
+                    grouped = df.groupby(x_column)[y_column].agg(agg_func).head(10)
+                    return [
+                        {x_column: str(idx), y_column: float(val)}
+                        for idx, val in grouped.items()
+                    ]
+                else:
+                    # Use value counts
+                    value_counts = df[x_column].value_counts().head(10)
+                    return [
+                        {x_column: str(idx), "count": int(val)}
+                        for idx, val in value_counts.items()
+                    ]
+
+            elif plot_type == "scatter":
+                # For scatter, return raw data points (limited)
+                sample = df[[x_column, y_column]].dropna().head(500)
+                return sample.to_dict('records')
+
+            else:
+                # Bar, line, area - aggregate data
+                if pd.api.types.is_numeric_dtype(df[y_column]):
+                    agg_func = self._get_agg_func(aggregation)
+
+                    if color_column:
+                        # Grouped aggregation
+                        grouped = df.groupby([x_column, color_column])[y_column].agg(agg_func).reset_index()
+                        grouped = grouped.head(100)  # Limit data points
+                    else:
+                        grouped = df.groupby(x_column)[y_column].agg(agg_func).reset_index()
+                        grouped = grouped.head(50)  # Limit data points
+
+                    # Convert to JSON-serializable format
+                    result = []
+                    for _, row in grouped.iterrows():
+                        point = {x_column: str(row[x_column]), y_column: float(row[y_column])}
+                        if color_column:
+                            point[color_column] = str(row[color_column])
+                        result.append(point)
+                    return result
+                else:
+                    # Count-based chart
+                    value_counts = df[x_column].value_counts().head(30)
+                    return [
+                        {x_column: str(idx), "count": int(val)}
+                        for idx, val in value_counts.items()
+                    ]
+
+        except Exception as e:
+            safe_print(f"[Planner] Error preparing chart data: {e}")
+            return []
+
+    def _get_agg_func(self, aggregation: str):
+        """Get pandas aggregation function."""
+        agg_map = {
+            "sum": "sum",
+            "mean": "mean",
+            "count": "count",
+            "min": "min",
+            "max": "max",
+            "median": "median",
+        }
+        return agg_map.get(aggregation, "sum")
+
+    def _generate_chart_summary(
+        self,
+        df: pd.DataFrame,
+        x_column: str,
+        y_column: str,
+        aggregation: str,
+    ) -> str:
+        """Generate a brief summary for the chart."""
+        try:
+            if pd.api.types.is_numeric_dtype(df[y_column]):
+                total = df[y_column].sum()
+                mean = df[y_column].mean()
+                return f"Total: {total:,.2f}, Average: {mean:,.2f}"
+            else:
+                unique_count = df[x_column].nunique()
+                return f"{unique_count} unique values in {x_column}"
+        except Exception:
+            return ""

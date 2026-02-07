@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Search, BarChart3, Download } from "lucide-react";
+import { Search, BarChart3 } from "lucide-react";
 import { MarkdownLatex } from "./MarkdownLatex";
+import { Chart, ChartConfig } from "./Chart";
 
 export interface PlotData {
   id: number;
@@ -8,31 +9,25 @@ export interface PlotData {
   columnsUsed: string;
   summary: string;
   insights: string;
-  path?: string; // Path to SVG file on backend
+  path?: string;
+  chartConfig?: ChartConfig;
+  chartData?: Record<string, unknown>[];
 }
 
 interface PlotsTabProps {
   plots: PlotData[];
 }
 
-function PlotImage({ path, title }: { path?: string; title: string }) {
-  if (!path) {
-    return (
-      <div className="w-full h-full flex items-center justify-center bg-gray-50">
-        <BarChart3 className="w-8 h-8 text-gray-300" />
-      </div>
-    );
+function PlotChart({ plot }: { plot: PlotData }) {
+  if (plot.chartConfig && plot.chartData && plot.chartData.length > 0) {
+    return <Chart config={plot.chartConfig} data={plot.chartData} thumbnail />;
   }
 
-  // Build URL for the plot image
-  const imageUrl = `/api/plot-image/${path.replace(/\\/g, '/')}`;
-
+  // Fallback placeholder
   return (
-    <img
-      src={imageUrl}
-      alt={title}
-      className="w-full h-full object-contain"
-    />
+    <div className="w-full h-full flex items-center justify-center" style={{ backgroundColor: '#161328' }}>
+      <BarChart3 className="w-8 h-8" style={{ color: '#3f3a4a' }} />
+    </div>
   );
 }
 
@@ -43,26 +38,22 @@ function ExpandedPlot({
   plot: PlotData;
   onCollapse: () => void;
 }) {
-  const handleDownload = () => {
-    if (!plot.path) return;
-    const link = document.createElement('a');
-    link.href = `/api/plot-image/${plot.path.replace(/\\/g, '/')}`;
-    link.download = `${plot.title.replace(/[^a-zA-Z0-9]/g, '_')}.svg`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
   return (
-    <div className="bg-white rounded-[20px] shrink-0 w-full border border-[rgba(142,142,147,0.1)] overflow-hidden">
+    <div
+      className="rounded-[20px] shrink-0 w-full overflow-hidden"
+      style={{ backgroundColor: '#1a1625', border: '1px solid rgba(147,51,234,0.12)' }}
+    >
       <div className="flex flex-col gap-2.5 px-5 py-2.5">
         {/* Chart */}
-        <div className="w-full aspect-[4/3] rounded-[10px] overflow-hidden border border-[rgba(142,142,147,0.1)] bg-white">
-          <PlotImage path={plot.path} title={plot.title} />
+        <div
+          className="w-full aspect-[4/3] rounded-[10px] overflow-hidden"
+          style={{ border: '1px solid rgba(147,51,234,0.12)', backgroundColor: '#161328' }}
+        >
+          <PlotChart plot={plot} />
         </div>
 
         {/* Title */}
-        <p className="text-[15px] text-black" style={{ fontWeight: 700 }}>
+        <p className="text-[15px]" style={{ fontWeight: 700, color: '#e4e4e7' }}>
           {plot.title}
         </p>
 
@@ -70,20 +61,20 @@ function ExpandedPlot({
         <div className="flex gap-5">
           {plot.summary && (
             <div className="flex-1 flex flex-col gap-1">
-              <p className="text-[13px] text-black" style={{ fontWeight: 510 }}>
+              <p className="text-[13px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>
                 Summary
               </p>
-              <div className="text-[10px] text-[#8e8e93]">
+              <div className="text-[10px]" style={{ color: '#a1a1aa' }}>
                 <MarkdownLatex>{plot.summary}</MarkdownLatex>
               </div>
             </div>
           )}
           {plot.columnsUsed && (
             <div className="flex-1 flex flex-col gap-1">
-              <p className="text-[13px] text-black" style={{ fontWeight: 510 }}>
+              <p className="text-[13px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>
                 Columns
               </p>
-              <p className="text-[10px] text-[#8e8e93]">{plot.columnsUsed}</p>
+              <p className="text-[10px]" style={{ color: '#a1a1aa' }}>{plot.columnsUsed}</p>
             </div>
           )}
         </div>
@@ -91,17 +82,15 @@ function ExpandedPlot({
         {/* Buttons */}
         <div className="flex gap-[5px] justify-end">
           <button
-            onClick={handleDownload}
-            className="h-[24px] px-4 rounded-md bg-[#0d6fff]/10 text-[#08f] text-[13px] flex items-center gap-1"
-            style={{ fontWeight: 510 }}
-          >
-            <Download className="w-3 h-3" />
-            Save SVG
-          </button>
-          <button
             onClick={onCollapse}
-            className="h-[24px] px-4 rounded-md bg-black/5 text-black/60 text-[13px]"
-            style={{ fontWeight: 510 }}
+            className="h-[24px] px-4 rounded-md text-[13px] hover:opacity-90 transition-all"
+            style={{
+              fontWeight: 510,
+              color: '#fff',
+              background: 'linear-gradient(135deg, rgba(63,58,74,0.7) 0%, rgba(50,45,65,0.8) 100%)',
+              border: '1px solid rgba(147,51,234,0.2)',
+              boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 2px rgba(0,0,0,0.2)',
+            }}
           >
             Close
           </button>
@@ -125,29 +114,41 @@ function PlotCard({
   }
 
   return (
-    <div className="bg-white rounded-[20px] shrink-0 w-full border border-[rgba(142,142,147,0.1)] overflow-hidden">
+    <div
+      className="rounded-[20px] shrink-0 w-full overflow-hidden"
+      style={{ backgroundColor: '#1a1625', border: '1px solid rgba(147,51,234,0.12)' }}
+    >
       <div className="flex gap-2.5 items-start p-2.5">
         {/* Thumbnail */}
-        <div className="w-[80px] h-[80px] shrink-0 rounded-[10px] overflow-hidden border border-[rgba(142,142,147,0.1)] bg-white">
-          <PlotImage path={plot.path} title={plot.title} />
+        <div
+          className="w-[80px] h-[80px] shrink-0 rounded-[10px] overflow-hidden"
+          style={{ border: '1px solid rgba(147,51,234,0.12)', backgroundColor: '#161328' }}
+        >
+          <PlotChart plot={plot} />
         </div>
 
         {/* Info */}
         <div className="flex-1 flex flex-col gap-1 items-end">
           <p
-            className="text-[15px] text-black w-full"
-            style={{ fontWeight: 700 }}
+            className="text-[15px] w-full"
+            style={{ fontWeight: 700, color: '#e4e4e7' }}
           >
             {plot.title}
           </p>
-          <p className="text-[10px] text-[#8e8e93] w-full">
+          <p className="text-[10px] w-full" style={{ color: '#a1a1aa' }}>
             {plot.columnsUsed || plot.summary || "Generated visualization"}
           </p>
           <div className="flex gap-[5px]">
             <button
               onClick={onToggle}
-              className="h-[24px] px-4 rounded-md bg-[#0d6fff]/10 text-[#08f] text-[13px]"
-              style={{ fontWeight: 510 }}
+              className="h-[24px] px-4 rounded-md text-[13px] hover:opacity-90 transition-all"
+              style={{
+                fontWeight: 510,
+                color: '#fff',
+                background: 'linear-gradient(135deg, rgba(147,51,234,0.5) 0%, rgba(107,33,168,0.6) 100%)',
+                border: '1px solid rgba(147,51,234,0.35)',
+                boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.1), 0 1px 2px rgba(0,0,0,0.2)',
+              }}
             >
               View
             </button>
@@ -174,13 +175,20 @@ export function PlotsTab({ plots }: PlotsTabProps) {
   if (plots.length === 0) {
     return (
       <div className="flex flex-col h-full items-center justify-center text-center px-5">
-        <div className="w-16 h-16 rounded-full bg-[#f5f5f7] flex items-center justify-center mb-4">
-          <BarChart3 className="w-8 h-8 text-[#8e8e93]" />
+        <div
+          className="w-16 h-16 rounded-full flex items-center justify-center mb-4"
+          style={{
+            background: 'linear-gradient(135deg, rgba(147,51,234,0.3) 0%, rgba(107,33,168,0.4) 100%)',
+            border: '1px solid rgba(147,51,234,0.2)',
+            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.06)',
+          }}
+        >
+          <BarChart3 className="w-8 h-8" style={{ color: '#a1a1aa' }} />
         </div>
-        <p className="text-[15px] text-black mb-1" style={{ fontWeight: 600 }}>
+        <p className="text-[15px] mb-1" style={{ fontWeight: 600, color: '#e4e4e7' }}>
           No plots yet
         </p>
-        <p className="text-[13px] text-[#8e8e93]">
+        <p className="text-[13px]" style={{ color: '#a1a1aa' }}>
           Plots will appear here as they are generated in the chat
         </p>
       </div>
@@ -191,15 +199,18 @@ export function PlotsTab({ plots }: PlotsTabProps) {
     <div className="flex flex-col h-full overflow-hidden">
       {/* Search */}
       <div className="flex items-center px-5 py-3 shrink-0">
-        <div className="flex-1 flex items-center gap-1 bg-white rounded-full px-2 h-[24px] shadow-[0px_0px_0px_1px_rgba(0,0,0,0.08)]">
-          <Search className="w-[13px] h-[13px] text-black" />
+        <div
+          className="flex-1 flex items-center gap-1 rounded-full px-2 h-[24px]"
+          style={{ backgroundColor: '#161328', border: '1px solid rgba(147,51,234,0.15)' }}
+        >
+          <Search className="w-[13px] h-[13px]" style={{ color: '#a1a1aa' }} />
           <input
             type="text"
             placeholder="Search"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="flex-1 bg-transparent text-[13px] text-[#4c4c4c] outline-none placeholder:text-[#4c4c4c]"
-            style={{ fontWeight: 510 }}
+            className="flex-1 bg-transparent text-[13px] outline-none"
+            style={{ fontWeight: 510, color: '#e4e4e7' }}
           />
         </div>
       </div>

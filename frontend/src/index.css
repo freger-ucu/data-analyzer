@@ -1017,43 +1017,43 @@
 
 :root {
   --font-size: 16px;
-  --background: #fff;
-  --foreground: oklch(.145 0 0);
-  --card: #fff;
-  --card-foreground: oklch(.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(.145 0 0);
-  --primary: #030213;
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(.95 .0058 264.53);
-  --secondary-foreground: #030213;
-  --muted: #ececf0;
-  --muted-foreground: #717182;
-  --accent: #e9ebef;
-  --accent-foreground: #030213;
+  --background: #111111;
+  --foreground: #e4e4e7;
+  --card: #252131;
+  --card-foreground: #e4e4e7;
+  --popover: #252131;
+  --popover-foreground: #e4e4e7;
+  --primary: #9333ea;
+  --primary-foreground: #fff;
+  --secondary: #3f3a4a;
+  --secondary-foreground: #e4e4e7;
+  --muted: #3f3a4a;
+  --muted-foreground: #a1a1aa;
+  --accent: #3f3a4a;
+  --accent-foreground: #e4e4e7;
   --destructive: #d4183d;
   --destructive-foreground: #fff;
-  --border: #0000001a;
+  --border: rgba(113, 113, 122, 0.3);
   --input: transparent;
-  --input-background: #f3f3f5;
-  --switch-background: #cbced4;
+  --input-background: #111111;
+  --switch-background: #3f3a4a;
   --font-weight-medium: 500;
   --font-weight-normal: 400;
-  --ring: oklch(.708 0 0);
+  --ring: #9333ea;
   --chart-1: oklch(.646 .222 41.116);
   --chart-2: oklch(.6 .118 184.704);
   --chart-3: oklch(.398 .07 227.392);
   --chart-4: oklch(.828 .189 84.429);
   --chart-5: oklch(.769 .188 70.08);
   --radius: .625rem;
-  --sidebar: oklch(.985 0 0);
-  --sidebar-foreground: oklch(.145 0 0);
-  --sidebar-primary: #030213;
-  --sidebar-primary-foreground: oklch(.985 0 0);
-  --sidebar-accent: oklch(.97 0 0);
-  --sidebar-accent-foreground: oklch(.205 0 0);
-  --sidebar-border: oklch(.922 0 0);
-  --sidebar-ring: oklch(.708 0 0);
+  --sidebar: #252131;
+  --sidebar-foreground: #e4e4e7;
+  --sidebar-primary: #9333ea;
+  --sidebar-primary-foreground: #fff;
+  --sidebar-accent: #3f3a4a;
+  --sidebar-accent-foreground: #e4e4e7;
+  --sidebar-border: rgba(113, 113, 122, 0.3);
+  --sidebar-ring: #9333ea;
 }
 
 .dark {
@@ -1093,8 +1093,10 @@
   --sidebar-ring: oklch(.439 0 0);
 }
 
-html {
+html, body {
   font-size: var(--font-size);
+  background-color: #111111;
+  color: #e4e4e7;
 }
 
 .full-height-block {
@@ -1149,6 +1151,21 @@ html {
 
 .typing-dot:nth-child(3) {
   animation-delay: 0.4s;
+}
+
+@keyframes status-pulse-anim {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.status-pulse {
+  animation: status-pulse-anim 1.5s ease-in-out infinite;
 }
 
 @property --tw-border-style {
