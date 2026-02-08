@@ -81,6 +81,10 @@ Engineering is the clear outlier — nearly double Support."
 If in doubt, prefer text and tables over charts. Text is faster and more information-dense. Users will ask for a chart if they want one.
 
 When you DO create a chart:
+- **ALWAYS specify x_column and y_column explicitly.** Never leave them blank — pick the most meaningful columns.
+- Match plot type to data: **line** for time/week/date trends, **bar** for category comparisons, **scatter** for numeric relationships, **histogram** for distributions.
+- If the data has a time/date/week/month column, that should almost always be the x-axis.
+- The y-axis should be the main metric the user cares about (counts, cases, revenue, etc.) — not probabilities or IDs.
 - For visualization requests without specific columns, pick the most interesting ones yourself. Do NOT ask for clarification.
 - After creating the chart, briefly explain what it shows (1-2 sentences).
 

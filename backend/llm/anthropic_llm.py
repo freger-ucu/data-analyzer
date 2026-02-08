@@ -36,7 +36,7 @@ PLANNER_TOOLS = [
     },
     {
         "name": "create_plot",
-        "description": "Create a visualization. Specify the plot type and columns - the system will generate the appropriate code.",
+        "description": "Create a visualization. ALWAYS specify x_column and y_column explicitly — pick the columns that best answer the user's question. Choose plot_type to match the data: line for time series / trends, bar for category comparisons, scatter for relationships between two numeric variables, histogram for distributions, pie for proportions, box for spread/outliers.",
         "input_schema": {
             "type": "object",
             "properties": {

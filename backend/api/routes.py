@@ -12,7 +12,7 @@ from backend.agents.planner import PlannerAgent, safe_print
 from backend.llm.anthropic_llm import AnthropicLLM
 from backend.llm.mock_llm import MockLLM
 from backend.config import get_settings, Settings
-from backend.services.session_manager import get_session_manager, SessionManager
+from backend.services.session_manager import get_session_manager, SessionManager, _safe_json_dumps, _sanitize_preview
 from backend.services.query_executor import get_query_executor, QueryExecutor
 import pandas as pd
 
@@ -329,7 +329,7 @@ async def get_data_preview(
         "row_count": len(df),
         "column_count": len(df.columns),
         "columns": df.columns.tolist(),
-        "preview": df.head(rows).to_dict(orient="records"),
+        "preview": _sanitize_preview(df, rows),
         "version": version,
     }
 
@@ -493,14 +493,14 @@ async def chat(
                         new_df = event.data.get("new_df")
                         # Don't include new_df in the SSE event
                         event_data = {k: v for k, v in event.data.items() if k != "new_df"}
-                        yield f"event: {event.event_type}\ndata: {json.dumps(event_data)}\n\n"
+                        yield f"event: {event.event_type}\ndata: {_safe_json_dumps(event_data)}\n\n"
                     else:
-                        yield f"event: {event.event_type}\ndata: {json.dumps(event.data)}\n\n"
+                        yield f"event: {event.event_type}\ndata: {_safe_json_dumps(event.data)}\n\n"
             except Exception as e:
                 import traceback
                 safe_print(f"[Routes] SSE generator error: {e}")
                 traceback.print_exc()
-                yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+                yield f"event: error\ndata: {_safe_json_dumps({'message': str(e)})}\n\n"
 
             # Save updated DataFrame if changed
             if data_updated and new_df is not None:

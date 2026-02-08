@@ -1,10 +1,77 @@
 import uuid
 import json
+import math
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 from backend.models.schemas import SessionInfo
+
+
+class _SafeJSONEncoder(json.JSONEncoder):
+    """JSON encoder that handles NaN, Infinity, and numpy types."""
+
+    def default(self, obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            val = float(obj)
+            if math.isnan(val) or math.isinf(val):
+                return None
+            return val
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        return super().default(obj)
+
+
+def _sanitize_value(val):
+    """Sanitize a single value for JSON serialization."""
+    if val is None:
+        return None
+    if isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            return None
+        return val
+    if isinstance(val, (np.floating,)):
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
+    if isinstance(val, (np.integer,)):
+        return int(val)
+    if isinstance(val, (np.bool_,)):
+        return bool(val)
+    if isinstance(val, pd.Timestamp):
+        return val.isoformat()
+    if isinstance(val, np.ndarray):
+        return val.tolist()
+    return val
+
+
+def _sanitize_obj(obj):
+    """Recursively sanitize an object for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_obj(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_obj(v) for v in obj]
+    return _sanitize_value(obj)
+
+
+def _safe_json_dumps(obj, **kwargs) -> str:
+    """JSON dumps that handles NaN/Infinity/numpy types."""
+    sanitized = _sanitize_obj(obj)
+    return json.dumps(sanitized, cls=_SafeJSONEncoder, **kwargs)
+
+
+def _sanitize_preview(df: pd.DataFrame, n: int = 100) -> list[dict]:
+    """Convert DataFrame head to list of dicts with NaN replaced by None."""
+    records = df.head(n).to_dict(orient="records")
+    return _sanitize_obj(records)
 
 
 class SessionManager:
@@ -173,7 +240,7 @@ class SessionManager:
             "row_count": len(df),
             "column_count": len(df.columns),
             "columns": df.columns.tolist(),
-            "preview": df.head(100).to_dict(orient="records"),
+            "preview": _sanitize_preview(df),
         }
 
         # Update session
@@ -242,7 +309,7 @@ class SessionManager:
             "row_count": len(df),
             "column_count": len(df.columns),
             "columns": df.columns.tolist(),
-            "preview": df.head(100).to_dict(orient="records"),
+            "preview": _sanitize_preview(df),
         }
 
         # Update session info
@@ -283,7 +350,7 @@ class SessionManager:
             "row_count": len(df),
             "column_count": len(df.columns),
             "columns": df.columns.tolist(),
-            "preview": df.head(100).to_dict(orient="records"),
+            "preview": _sanitize_preview(df),
         }
 
         # Update session
@@ -360,8 +427,8 @@ class SessionManager:
 
         history.append(message)
 
-        # Save
-        history_file.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Save (use safe encoder to handle NaN/numpy types in plot_data)
+        history_file.write_text(_safe_json_dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
 
         return message
 
@@ -414,8 +481,8 @@ class SessionManager:
 
         plots.append(plot_data)
 
-        # Save
-        plots_file.write_text(json.dumps(plots, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Save (use safe encoder to handle NaN/numpy types in chart data)
+        plots_file.write_text(_safe_json_dumps(plots, indent=2, ensure_ascii=False), encoding="utf-8")
 
         return plot_data
 

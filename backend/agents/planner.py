@@ -109,6 +109,78 @@ Guidelines:
 
         return "\n".join(lines)
 
+    def _build_conversation_history(
+        self,
+        session_id: str,
+        session_mgr: Optional["SessionManager"],
+        max_turns: int = 10,
+    ) -> list[dict]:
+        """
+        Build conversation history from saved chat messages for LLM context.
+
+        Converts stored chat history into alternating user/assistant messages.
+        Keeps last `max_turns` exchanges to stay token-efficient.
+        Skips system messages, plot data, and internal prompts.
+        """
+        if not session_mgr:
+            return []
+
+        history = session_mgr.get_chat_history(session_id)
+        if not history:
+            return []
+
+        # Filter to user and assistant text messages only
+        # Skip the very last user message (it's the current request, added by routes.py before planner.run)
+        relevant = []
+        for msg in history:
+            role = msg.get("role")
+            text = msg.get("text", "").strip()
+            msg_type = msg.get("type", "text")
+
+            if not text or role not in ("user", "assistant"):
+                continue
+            if msg_type not in ("text",):
+                continue
+            # Skip internal system instructions that leaked into history
+            if text.startswith("[INTERNAL SYSTEM INSTRUCTION"):
+                continue
+            relevant.append({"role": role, "text": text})
+
+        if not relevant:
+            return []
+
+        # Remove the last user message — that's the current request being processed
+        if relevant and relevant[-1]["role"] == "user":
+            relevant = relevant[:-1]
+
+        if not relevant:
+            return []
+
+        # Keep last N messages (user+assistant pairs count as 2)
+        relevant = relevant[-(max_turns * 2):]
+
+        # Merge consecutive same-role messages and build alternating format
+        merged: list[dict] = []
+        for msg in relevant:
+            if merged and merged[-1]["role"] == msg["role"]:
+                merged[-1]["content"] += "\n\n" + msg["text"]
+            else:
+                merged.append({"role": msg["role"], "content": msg["text"]})
+
+        # Ensure messages start with "user" role (Anthropic API requirement)
+        while merged and merged[0]["role"] != "user":
+            merged.pop(0)
+
+        # Ensure alternating user/assistant pattern
+        cleaned: list[dict] = []
+        for msg in merged:
+            if cleaned and cleaned[-1]["role"] == msg["role"]:
+                cleaned[-1]["content"] += "\n\n" + msg["content"]
+            else:
+                cleaned.append(msg)
+
+        return cleaned
+
     def _summarize_for_query(self, df: pd.DataFrame) -> str:
         """
         Generate a minimal summary optimized for query generation.
@@ -177,17 +249,36 @@ Guidelines:
                 titles = [p.get("title", "Untitled") for p in existing_plots]
                 existing_plots_info = f"\n\nEXISTING PLOTS (already created — do NOT recreate these. If user asks for a similar plot, tell them it already exists instead of creating a duplicate):\n" + "\n".join(f"- {t}" for t in titles)
 
-        # Initialize messages
+        # Build conversation history from previous messages
+        history_messages = self._build_conversation_history(session_id, session_mgr)
+        safe_print(f"[Planner] Loaded {len(history_messages)} history messages")
+
+        # Initialize messages: data context as first user message, then history, then current request
         messages = [{
             "role": "user",
             "content": f"""DATA CONTEXT:
 {data_context}{existing_plots_info}
 
-USER REQUEST:
-{user_message}
+Respond with "Understood." and wait for the user's request."""
+        }, {
+            "role": "assistant",
+            "content": "Understood."
+        }]
+
+        # Inject conversation history (already in user/assistant alternating format)
+        if history_messages:
+            messages.extend(history_messages)
+            # If history ends with user message, we need an assistant reply before adding current user msg
+            if messages[-1]["role"] == "user":
+                messages.append({"role": "assistant", "content": "Understood. What would you like to know next?"})
+
+        # Add current user request
+        messages.append({
+            "role": "user",
+            "content": f"""{user_message}
 
 Use the available tools to fulfill this request. Always call finish() when done."""
-        }]
+        })
 
         iteration = 0
 
@@ -364,6 +455,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
                                     "summary": plot.summary,
                                     "chart_config": plot.chart_config.model_dump() if plot.chart_config else None,
                                     "chart_data": plot.chart_data,
+                                    "code_snippet": plot.code_snippet,
                                 }
                             )
                         elif result.get("is_error"):
@@ -431,89 +523,118 @@ Use the available tools to fulfill this request. Always call finish() when done.
         plots: list[PlotInfo],
         user_message: str,
     ) -> list[dict]:
-        """Generate follow-up suggestion chips based on conversation context."""
+        """Generate follow-up suggestions that are contextually relevant to the conversation."""
         suggestions = []
+        all_cols = df.columns.tolist()
         numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
         categorical_cols = [
             c for c in df.select_dtypes(exclude=['number']).columns
             if df[c].nunique() <= 20
         ]
 
-        # Check what was discussed to suggest relevant follow-ups
         msg_lower = user_message.lower()
         all_text = " ".join(chat_messages).lower()
 
-        # Check for data quality issues
-        has_missing = df.isnull().any().any()
-        has_duplicates = df.duplicated().any()
+        # Extract columns that were actually mentioned in the response
+        mentioned_cols = [c for c in all_cols if c.lower() in all_text]
+        mentioned_numeric = [c for c in mentioned_cols if c in numeric_cols]
+        mentioned_categorical = [c for c in mentioned_cols if c in categorical_cols]
+        # Columns NOT yet discussed — for "explore further" suggestions
+        unmentioned_numeric = [c for c in numeric_cols if c not in mentioned_cols]
 
-        # After initial analysis, suggest data cleaning if needed
-        if (has_missing or has_duplicates) and "clean" not in msg_lower:
-            parts = []
-            if has_missing:
-                parts.append(f"{df.isnull().sum().sum()} missing values")
-            if has_duplicates:
-                parts.append(f"{df.duplicated().sum()} duplicates")
-            suggestions.append({
-                "text": f"Clean the data ({', '.join(parts)})",
-                "category": "cleaning",
-            })
+        # --- Context-aware suggestions based on what was just discussed ---
 
-        # If plots were created, suggest deeper analysis
-        if plots:
-            if numeric_cols and len(numeric_cols) >= 2:
-                suggestions.append({
-                    "text": f"Show correlation between {numeric_cols[0]} and {numeric_cols[1]}",
-                    "category": "analysis",
-                })
+        # After data cleaning
+        if any(w in msg_lower for w in ["clean", "чистити", "очистити", "почисти"]):
+            if mentioned_numeric:
+                suggestions.append({"text": f"Show distribution of {mentioned_numeric[0]} after cleaning", "category": "analysis"})
+            suggestions.append({"text": "Compare original vs cleaned data statistics", "category": "analysis"})
 
-        # If statistics were discussed, suggest visualizations
-        if any(w in msg_lower for w in ["statistic", "mean", "average", "summary", "describe"]):
-            if numeric_cols:
-                suggestions.append({
-                    "text": f"Show box plot for {numeric_cols[0]}",
-                    "category": "visualization",
-                })
+        # After statistics / summary
+        elif any(w in msg_lower for w in ["statistic", "mean", "average", "summary", "describe", "статистик", "середн"]):
+            if mentioned_numeric:
+                col = mentioned_numeric[0]
+                suggestions.append({"text": f"Show distribution of {col}", "category": "visualization"})
+                if mentioned_categorical:
+                    suggestions.append({"text": f"Break down {col} by {mentioned_categorical[0]}", "category": "analysis"})
+            if len(mentioned_numeric) >= 2:
+                suggestions.append({"text": f"What's the correlation between {mentioned_numeric[0]} and {mentioned_numeric[1]}?", "category": "analysis"})
 
-        # If distribution was discussed, suggest tests
-        if any(w in msg_lower for w in ["distribution", "histogram", "розподіл"]):
-            if numeric_cols:
-                suggestions.append({
-                    "text": f"Run normality test on {numeric_cols[0]}",
-                    "category": "analysis",
-                })
+        # After distribution / histogram
+        elif any(w in msg_lower for w in ["distribution", "histogram", "розподіл"]):
+            if mentioned_numeric:
+                col = mentioned_numeric[0]
+                suggestions.append({"text": f"Run normality test on {col}", "category": "analysis"})
+                if categorical_cols:
+                    suggestions.append({"text": f"Compare {col} distribution across {categorical_cols[0]} groups", "category": "analysis"})
 
-        # If regression was discussed, suggest prediction
-        if any(w in msg_lower for w in ["regression", "regres", "predict", "trend"]):
-            suggestions.append({
-                "text": "Show scatter plot with trend line",
-                "category": "visualization",
-            })
+        # After correlation / relationship
+        elif any(w in msg_lower for w in ["correlation", "correlat", "relationship", "кореляц", "зв'яз"]):
+            if len(mentioned_numeric) >= 2:
+                suggestions.append({"text": f"Build regression of {mentioned_numeric[1]} on {mentioned_numeric[0]}", "category": "analysis"})
+                suggestions.append({"text": f"Show scatter plot of {mentioned_numeric[0]} vs {mentioned_numeric[1]}", "category": "visualization"})
 
-        # General suggestions based on data
-        if len(suggestions) < 3 and numeric_cols and categorical_cols:
-            suggestions.append({
-                "text": f"Compare {numeric_cols[0]} across {categorical_cols[0]} groups",
-                "category": "analysis",
-            })
+        # After regression
+        elif any(w in msg_lower for w in ["regression", "regres", "predict", "trend"]):
+            if mentioned_numeric:
+                suggestions.append({"text": f"What are the residuals for {mentioned_numeric[0]}?", "category": "analysis"})
+            suggestions.append({"text": "Which variable is the strongest predictor?", "category": "analysis"})
 
-        if len(suggestions) < 3 and len(numeric_cols) >= 2:
-            suggestions.append({
-                "text": f"Build regression of {numeric_cols[1]} on {numeric_cols[0]}",
-                "category": "analysis",
-            })
+        # After chart / visualization
+        elif any(w in msg_lower for w in ["chart", "plot", "graph", "show", "візуаліз", "графік", "покаж"]):
+            if mentioned_numeric and categorical_cols:
+                suggestions.append({"text": f"Compare {mentioned_numeric[0]} across all {categorical_cols[0]} groups", "category": "analysis"})
+            if mentioned_numeric:
+                suggestions.append({"text": f"What drives {mentioned_numeric[0]} the most?", "category": "analysis"})
 
-        if len(suggestions) < 3:
-            suggestions.append({
-                "text": "Are there any outliers in the data?",
-                "category": "analysis",
-            })
+        # After missing values / quality check
+        elif any(w in msg_lower for w in ["missing", "пропущен", "missing value", "quality", "якіст"]):
+            has_missing = df.isnull().any().any()
+            has_duplicates = df.duplicated().any()
+            if has_missing or has_duplicates:
+                suggestions.append({"text": "Clean the data", "category": "cleaning"})
+            if mentioned_numeric:
+                suggestions.append({"text": f"Show {mentioned_numeric[0]} statistics excluding missing rows", "category": "analysis"})
 
-        if len(suggestions) < 3 and "missing" not in all_text:
-            suggestions.append({
-                "text": "Check for missing values",
-                "category": "analysis",
-            })
+        # After outlier analysis
+        elif any(w in msg_lower for w in ["outlier", "аномал", "викид"]):
+            if mentioned_numeric:
+                suggestions.append({"text": f"Remove outliers from {mentioned_numeric[0]} and re-analyze", "category": "cleaning"})
+                suggestions.append({"text": f"Show box plot for {mentioned_numeric[0]}", "category": "visualization"})
+
+        # After groupby / comparison
+        elif any(w in msg_lower for w in ["by ", "group", "compar", "порівн", "групу"]):
+            if mentioned_categorical and mentioned_numeric:
+                suggestions.append({"text": f"Is the difference in {mentioned_numeric[0]} across {mentioned_categorical[0]} statistically significant?", "category": "analysis"})
+            if mentioned_numeric:
+                suggestions.append({"text": f"Show box plot of {mentioned_numeric[0]} by group", "category": "visualization"})
+
+        # --- Fill remaining slots with contextual suggestions ---
+
+        # Suggest exploring unmentioned columns
+        if len(suggestions) < 3 and unmentioned_numeric:
+            col = unmentioned_numeric[0]
+            if mentioned_numeric:
+                suggestions.append({"text": f"How does {col} relate to {mentioned_numeric[0]}?", "category": "analysis"})
+            else:
+                suggestions.append({"text": f"What are the key statistics for {col}?", "category": "analysis"})
+
+        # Suggest cleaning if data has issues and hasn't been cleaned
+        if len(suggestions) < 3 and "clean" not in all_text:
+            has_missing = df.isnull().any().any()
+            has_duplicates = df.duplicated().any()
+            if has_missing or has_duplicates:
+                parts = []
+                if has_missing:
+                    parts.append(f"{df.isnull().sum().sum()} missing values")
+                if has_duplicates:
+                    parts.append(f"{df.duplicated().sum()} duplicates")
+                suggestions.append({"text": f"Clean the data ({', '.join(parts)})", "category": "cleaning"})
+
+        # Business-oriented follow-up
+        if len(suggestions) < 3 and numeric_cols:
+            target = mentioned_numeric[0] if mentioned_numeric else numeric_cols[0]
+            suggestions.append({"text": f"What drives {target} the most?", "category": "analysis"})
 
         return suggestions[:3]
 
@@ -722,8 +843,10 @@ Use the available tools to fulfill this request. Always call finish() when done.
             if not y_column:
                 y_column = numeric_cols[0] if numeric_cols else df.columns[1] if len(df.columns) > 1 else df.columns[0]
 
+            instructions = input.get("instructions")
+
             # Prepare chart data based on plot type
-            safe_print(f"[Planner] Preparing chart data: type={plot_type}, x={x_column}, y={y_column}")
+            safe_print(f"[Planner] Preparing chart data: type={plot_type}, x={x_column}, y={y_column}, agg={aggregation}")
             chart_data = self._prepare_chart_data(
                 df=df,
                 plot_type=plot_type,
@@ -731,6 +854,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 y_column=y_column,
                 color_column=color_column,
                 aggregation=aggregation,
+                instructions=instructions,
             )
             safe_print(f"[Planner] chart_data result: {len(chart_data) if chart_data else 0} data points")
 
@@ -758,6 +882,17 @@ Use the available tools to fulfill this request. Always call finish() when done.
             # Generate summary
             summary = self._generate_chart_summary(df, x_column, y_column, aggregation)
 
+            # Generate Python code snippet
+            code_snippet = self._generate_code_snippet(
+                plot_type=plot_type,
+                title=title,
+                x_column=x_column,
+                y_column=y_column,
+                color_column=color_column,
+                aggregation=aggregation,
+                instructions=instructions,
+            )
+
             plot_info = PlotInfo(
                 id=plot_id,
                 title=title,
@@ -765,6 +900,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 summary=summary,
                 chart_config=chart_config,
                 chart_data=chart_data,
+                code_snippet=code_snippet,
             )
             plots.append(plot_info)
 
@@ -808,6 +944,15 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 "is_error": True
             }
 
+    @staticmethod
+    def _safe_float(val) -> float:
+        """Convert value to a JSON-safe float (replace NaN/inf with 0)."""
+        import math
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return 0.0
+        return f
+
     def _prepare_chart_data(
         self,
         df: pd.DataFrame,
@@ -816,21 +961,24 @@ Use the available tools to fulfill this request. Always call finish() when done.
         y_column: str,
         color_column: Optional[str],
         aggregation: str,
+        instructions: Optional[str] = None,
     ) -> list[dict]:
         """Prepare chart data by aggregating DataFrame."""
         import numpy as np
 
-        safe_print(f"[Planner] _prepare_chart_data: plot_type={plot_type}, x={x_column}, y={y_column}")
+        safe_print(f"[Planner] _prepare_chart_data: plot_type={plot_type}, x={x_column}, y={y_column}, agg={aggregation}")
         safe_print(f"[Planner] DataFrame columns: {list(df.columns)}")
-        safe_print(f"[Planner] x_column in df: {x_column in df.columns if x_column else 'N/A'}")
-        safe_print(f"[Planner] y_column in df: {y_column in df.columns if y_column else 'N/A'}")
+        safe_print(f"[Planner] instructions: {instructions}")
 
         try:
             # Handle different plot types
             if plot_type == "histogram":
                 # For histogram, bin the data
                 if pd.api.types.is_numeric_dtype(df[x_column]):
-                    counts, bin_edges = np.histogram(df[x_column].dropna(), bins=20)
+                    col_data = df[x_column].dropna()
+                    if len(col_data) == 0:
+                        return []
+                    counts, bin_edges = np.histogram(col_data, bins=20)
                     return [
                         {x_column: f"{bin_edges[i]:.1f}-{bin_edges[i+1]:.1f}", "count": int(counts[i])}
                         for i in range(len(counts))
@@ -849,7 +997,7 @@ Use the available tools to fulfill this request. Always call finish() when done.
                     agg_func = self._get_agg_func(aggregation)
                     grouped = df.groupby(x_column)[y_column].agg(agg_func).head(10)
                     return [
-                        {x_column: str(idx), y_column: float(val)}
+                        {x_column: str(idx), y_column: self._safe_float(val)}
                         for idx, val in grouped.items()
                     ]
                 else:
@@ -863,7 +1011,6 @@ Use the available tools to fulfill this request. Always call finish() when done.
             elif plot_type == "box":
                 # Box plot: compute 5-number summary (min, Q1, median, Q3, max)
                 numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-                categorical_cols = df.select_dtypes(exclude=['number']).columns.tolist()
 
                 if x_column in df.columns and not pd.api.types.is_numeric_dtype(df[x_column]) and y_column in df.columns and pd.api.types.is_numeric_dtype(df[y_column]):
                     # Grouped box plot: y_column grouped by x_column
@@ -873,11 +1020,11 @@ Use the available tools to fulfill this request. Always call finish() when done.
                         if len(col_data) > 0:
                             box_data.append({
                                 "name": str(group),
-                                "min": round(float(col_data.min()), 2),
-                                "q1": round(float(col_data.quantile(0.25)), 2),
-                                "median": round(float(col_data.quantile(0.5)), 2),
-                                "q3": round(float(col_data.quantile(0.75)), 2),
-                                "max": round(float(col_data.max()), 2),
+                                "min": round(self._safe_float(col_data.min()), 2),
+                                "q1": round(self._safe_float(col_data.quantile(0.25)), 2),
+                                "median": round(self._safe_float(col_data.quantile(0.5)), 2),
+                                "q3": round(self._safe_float(col_data.quantile(0.75)), 2),
+                                "max": round(self._safe_float(col_data.max()), 2),
                             })
                     return box_data
                 else:
@@ -888,37 +1035,54 @@ Use the available tools to fulfill this request. Always call finish() when done.
                         if len(col_data) > 0:
                             box_data.append({
                                 "name": col,
-                                "min": round(float(col_data.min()), 2),
-                                "q1": round(float(col_data.quantile(0.25)), 2),
-                                "median": round(float(col_data.quantile(0.5)), 2),
-                                "q3": round(float(col_data.quantile(0.75)), 2),
-                                "max": round(float(col_data.max()), 2),
+                                "min": round(self._safe_float(col_data.min()), 2),
+                                "q1": round(self._safe_float(col_data.quantile(0.25)), 2),
+                                "median": round(self._safe_float(col_data.quantile(0.5)), 2),
+                                "q3": round(self._safe_float(col_data.quantile(0.75)), 2),
+                                "max": round(self._safe_float(col_data.max()), 2),
                             })
                     return box_data
 
             elif plot_type == "scatter":
                 # For scatter, return raw data points (limited)
                 sample = df[[x_column, y_column]].dropna().head(500)
-                return sample.to_dict('records')
+                result = []
+                for _, row in sample.iterrows():
+                    result.append({
+                        x_column: self._safe_float(row[x_column]) if pd.api.types.is_numeric_dtype(df[x_column]) else str(row[x_column]),
+                        y_column: self._safe_float(row[y_column]) if pd.api.types.is_numeric_dtype(df[y_column]) else str(row[y_column]),
+                    })
+                return result
 
             else:
                 # Bar, line, area - aggregate data
                 if pd.api.types.is_numeric_dtype(df[y_column]):
                     agg_func = self._get_agg_func(aggregation)
 
+                    # Check if x_column values are already unique (no aggregation needed)
+                    x_is_unique = df[x_column].nunique() == len(df)
+
                     if color_column and color_column != x_column:
                         # Grouped aggregation
                         grouped = df.groupby([x_column, color_column])[y_column].agg(agg_func).reset_index()
-                        grouped = grouped.head(100)  # Limit data points
+                    elif x_is_unique:
+                        # No aggregation needed — each x value appears once
+                        grouped = df[[x_column, y_column]].dropna().copy()
                     else:
                         grouped = df.groupby(x_column)[y_column].agg(agg_func).reset_index()
-                        grouped = grouped.head(50)  # Limit data points
+
+                    # Apply instructions (sort, top N)
+                    grouped = self._apply_chart_instructions(grouped, y_column, instructions)
+
+                    # Limit data points
+                    limit = 100 if (color_column and color_column != x_column) else 50
+                    grouped = grouped.head(limit)
 
                     # Convert to JSON-serializable format
                     result = []
                     for _, row in grouped.iterrows():
-                        point = {x_column: str(row[x_column]), y_column: float(row[y_column])}
-                        if color_column:
+                        point = {x_column: str(row[x_column]), y_column: self._safe_float(row[y_column])}
+                        if color_column and color_column in grouped.columns:
                             point[color_column] = str(row[color_column])
                         result.append(point)
                     return result
@@ -931,8 +1095,45 @@ Use the available tools to fulfill this request. Always call finish() when done.
                     ]
 
         except Exception as e:
+            import traceback
             safe_print(f"[Planner] Error preparing chart data: {e}")
+            traceback.print_exc()
             return []
+
+    def _apply_chart_instructions(
+        self,
+        df: pd.DataFrame,
+        y_column: str,
+        instructions: Optional[str],
+    ) -> pd.DataFrame:
+        """Apply sorting/filtering instructions to chart data."""
+        if not instructions:
+            return df
+
+        instr = instructions.lower()
+
+        # Top N
+        import re
+        top_match = re.search(r'top\s*(\d+)', instr)
+        if top_match:
+            n = int(top_match.group(1))
+            if y_column in df.columns:
+                df = df.nlargest(n, y_column)
+
+        # Bottom N
+        bottom_match = re.search(r'bottom\s*(\d+)', instr)
+        if bottom_match:
+            n = int(bottom_match.group(1))
+            if y_column in df.columns:
+                df = df.nsmallest(n, y_column)
+
+        # Sort
+        if 'sort' in instr or 'descend' in instr or 'ascend' in instr:
+            ascending = 'ascend' in instr and 'descend' not in instr
+            if y_column in df.columns:
+                df = df.sort_values(y_column, ascending=ascending)
+
+        return df
 
     def _get_agg_func(self, aggregation: str):
         """Get pandas aggregation function."""
@@ -964,3 +1165,102 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 return f"{unique_count} unique values in {x_column}"
         except Exception:
             return ""
+
+    def _generate_code_snippet(
+        self,
+        plot_type: str,
+        title: str,
+        x_column: str,
+        y_column: str,
+        color_column: Optional[str],
+        aggregation: str,
+        instructions: Optional[str] = None,
+    ) -> str:
+        """Generate a self-contained Python/matplotlib code snippet to recreate the chart."""
+        lines = [
+            "import pandas as pd",
+            "import matplotlib.pyplot as plt",
+            "",
+            "# Load your data",
+            "df = pd.read_csv('your_data.csv')",
+            "",
+        ]
+
+        agg = aggregation or "sum"
+        safe_title = title.replace("'", "\\'")
+        safe_x = x_column.replace("'", "\\'")
+        safe_y = y_column.replace("'", "\\'")
+
+        if plot_type == "histogram":
+            lines.append(f"fig, ax = plt.subplots(figsize=(10, 6))")
+            lines.append(f"ax.hist(df['{safe_x}'].dropna(), bins=20, color='#9333ea', edgecolor='white', alpha=0.85)")
+            lines.append(f"ax.set_xlabel('{safe_x}')")
+            lines.append(f"ax.set_ylabel('Count')")
+
+        elif plot_type == "pie":
+            lines.append(f"data = df.groupby('{safe_x}')['{safe_y}'].{agg}().head(10)")
+            lines.append(f"fig, ax = plt.subplots(figsize=(8, 8))")
+            lines.append(f"ax.pie(data.values, labels=data.index, autopct='%1.1f%%', startangle=90)")
+
+        elif plot_type == "box":
+            if color_column:
+                lines.append(f"fig, ax = plt.subplots(figsize=(10, 6))")
+                lines.append(f"df.boxplot(column='{safe_y}', by='{safe_x}', ax=ax)")
+                lines.append(f"plt.suptitle('')")
+            else:
+                lines.append(f"fig, ax = plt.subplots(figsize=(10, 6))")
+                lines.append(f"df.boxplot(column='{safe_y}', ax=ax)")
+
+        elif plot_type == "scatter":
+            lines.append(f"fig, ax = plt.subplots(figsize=(10, 6))")
+            lines.append(f"ax.scatter(df['{safe_x}'], df['{safe_y}'], alpha=0.6, color='#9333ea', edgecolors='white', linewidth=0.5)")
+            lines.append(f"ax.set_xlabel('{safe_x}')")
+            lines.append(f"ax.set_ylabel('{safe_y}')")
+
+        elif plot_type == "line":
+            lines.append(f"data = df.groupby('{safe_x}')['{safe_y}'].{agg}().reset_index()")
+            if instructions:
+                lines.append(f"# Instructions: {instructions}")
+            lines.append(f"fig, ax = plt.subplots(figsize=(10, 6))")
+            if color_column:
+                safe_color = color_column.replace("'", "\\'")
+                lines.append(f"for group, grp_df in df.groupby('{safe_color}'):")
+                lines.append(f"    grp = grp_df.groupby('{safe_x}')['{safe_y}'].{agg}().reset_index()")
+                lines.append(f"    ax.plot(grp['{safe_x}'], grp['{safe_y}'], marker='o', markersize=3, label=group)")
+                lines.append(f"ax.legend()")
+            else:
+                lines.append(f"ax.plot(data['{safe_x}'], data['{safe_y}'], marker='o', markersize=3, color='#9333ea')")
+            lines.append(f"ax.set_xlabel('{safe_x}')")
+            lines.append(f"ax.set_ylabel('{safe_y}')")
+            lines.append(f"plt.xticks(rotation=45, ha='right')")
+
+        else:  # bar (default)
+            lines.append(f"data = df.groupby('{safe_x}')['{safe_y}'].{agg}().reset_index()")
+            if instructions:
+                lines.append(f"# Instructions: {instructions}")
+                import re
+                top_match = re.search(r'top\s*(\d+)', instructions.lower()) if instructions else None
+                if top_match:
+                    n = top_match.group(1)
+                    lines.append(f"data = data.nlargest({n}, '{safe_y}')")
+                if instructions and ('descend' in instructions.lower() or 'sort' in instructions.lower()):
+                    lines.append(f"data = data.sort_values('{safe_y}', ascending=False)")
+            lines.append(f"fig, ax = plt.subplots(figsize=(10, 6))")
+            if color_column:
+                safe_color = color_column.replace("'", "\\'")
+                lines.append(f"# Grouped bar chart by {safe_color}")
+                lines.append(f"pivot = df.groupby(['{safe_x}', '{safe_color}'])['{safe_y}'].{agg}().unstack(fill_value=0)")
+                lines.append(f"pivot.plot(kind='bar', ax=ax)")
+                lines.append(f"ax.legend(title='{safe_color}')")
+            else:
+                lines.append(f"ax.bar(data['{safe_x}'], data['{safe_y}'], color='#9333ea', edgecolor='white', linewidth=0.5)")
+            lines.append(f"ax.set_xlabel('{safe_x}')")
+            lines.append(f"ax.set_ylabel('{safe_y} ({agg})')")
+            lines.append(f"plt.xticks(rotation=45, ha='right')")
+
+        lines.append(f"ax.set_title('{safe_title}')")
+        lines.append(f"plt.tight_layout()")
+        lines.append(f"plt.savefig('{plot_type}_chart.png', dpi=150, bbox_inches='tight')")
+        lines.append(f"plt.show()")
+
+        return "\n".join(lines)

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical } from "lucide-react";
+import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical, Code } from "lucide-react";
 import { DataTab } from "./components/DataTab";
 import { PlotsTab, PlotData } from "./components/PlotsTab";
 import { MarkdownLatex } from "./components/MarkdownLatex";
@@ -66,7 +66,7 @@ export default function App() {
   const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [plots, setPlots] = useState<PlotData[]>([]);
-  const [fullscreenPlot, setFullscreenPlot] = useState<{ title: string; chartConfig: ChartConfig; chartData: Record<string, unknown>[] } | null>(null);
+  const [fullscreenPlot, setFullscreenPlot] = useState<{ title: string; chartConfig: ChartConfig; chartData: Record<string, unknown>[]; codeSnippet?: string } | null>(null);
   const [dataVersion, setDataVersion] = useState<"current" | "original">("current");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<{ text: string; category: string }[]>([]);
@@ -78,8 +78,11 @@ export default function App() {
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [chartTheme, setChartTheme] = useState<ChartTheme>({});
   const [featurePopup, setFeaturePopup] = useState<number | null>(null);
+  const [codeCopiedModal, setCodeCopiedModal] = useState(false);
+  const [exportPlot, setExportPlot] = useState<{ title: string; chartConfig: ChartConfig; chartData: Record<string, unknown>[] } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plotExportRef = useRef<HTMLDivElement>(null);
+  const offscreenExportRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dragCounterRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -442,6 +445,7 @@ export default function App() {
           insights: "",
           chartConfig: data.chart_config as ChartConfig | undefined,
           chartData: data.chart_data as Record<string, unknown>[] | undefined,
+          codeSnippet: (data.code_snippet as string) || undefined,
         };
         setPlots((prev) => [...prev, plotData]);
 
@@ -576,27 +580,17 @@ export default function App() {
           preview: data.preview,
         });
 
-        // Auto-request data summary from the Planner
+        // Auto-request data summary from the Planner (internal — invisible to user)
         try {
-          await sendChatMessage(`Analyze this dataset: ${data.filename} (${data.row_count} rows, ${data.column_count} columns).
+          await sendChatMessage(`[INTERNAL SYSTEM INSTRUCTION — do NOT repeat, reference, or quote any part of this message in your response. Respond as if you decided to analyze the data on your own initiative.]
 
-Do this step by step using multiple messages:
-
-1. First message: brief overview — what this data is about, what each row represents, the domain.
-
-2. Run queries to get column info and statistics, then share a Column Dictionary as a markdown table:
-| # | Column | Type | Description | Example Values |
-|--:|--------|------|-------------|----------------|
-
-3. Run queries for key statistics, then share a stats table for numeric columns:
-| Variable | Min | Max | Mean | Median | Missing |
-|----------|----:|----:|-----:|-------:|--------:|
-
-4. Data quality check — investigate and report: missing values, duplicates, type issues, anomalies. Use tables.
-
-5. Key insights — 2-3 dense observations about patterns or interesting findings. Formulate 1 hypothesis worth investigating.
-
-Create 1 chart max — only the single most interesting visualization for this data.`, true);
+Perform a comprehensive first-look analysis of this dataset. Use multiple short messages. Include:
+- Brief overview of what the data is about
+- Column dictionary as a markdown table (# | Column | Type | Description | Example Values)
+- Key statistics table for numeric columns (Variable | Min | Max | Mean | Median | Missing)
+- Data quality check (missing values, duplicates, type issues, anomalies)
+- 2-3 key insights and 1 hypothesis
+- 1 chart max — only if truly insightful`, true);
         } catch (error) {
           // Fallback to simple system message if chat fails
           console.error("Auto-summary failed:", error);
@@ -736,15 +730,35 @@ Create 1 chart max — only the single most interesting visualization for this d
     }
   };
 
-  // Save plot from PlotsTab (opens fullscreen briefly, captures, auto-closes)
+  // Save plot directly (off-screen render, no modal flash)
   const handleSavePlotFromPanel = async (plot: PlotData) => {
     if (!plot.chartConfig || !plot.chartData) return;
-    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData });
-    // Wait for render, then save and close
+    setExportPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData });
+    // Wait for off-screen chart to render, then capture and clean up
     setTimeout(async () => {
-      await handleSavePlotPng();
-      setFullscreenPlot(null);
-      setChartTheme({});
+      const el = offscreenExportRef.current;
+      if (el) {
+        try {
+          const { default: html2canvas } = await import("html2canvas");
+          const canvas = await html2canvas(el, { backgroundColor: "#1e1b2e", scale: 2 });
+          const link = document.createElement("a");
+          link.download = `${plot.title || "plot"}.png`;
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        } catch {
+          const svg = el.querySelector("svg");
+          if (svg) {
+            const svgData = new XMLSerializer().serializeToString(svg);
+            const svgBlob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
+            const link = document.createElement("a");
+            link.download = `${plot.title || "plot"}.svg`;
+            link.href = URL.createObjectURL(svgBlob);
+            link.click();
+            URL.revokeObjectURL(link.href);
+          }
+        }
+      }
+      setExportPlot(null);
     }, 600);
   };
 
@@ -888,11 +902,11 @@ Create 1 chart max — only the single most interesting visualization for this d
               ) : (
                 <PlotsTab plots={plots} onViewPlot={(plot) => {
                   if (plot.chartConfig && plot.chartData) {
-                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData });
+                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData, codeSnippet: plot.codeSnippet });
                   }
                 }} onSavePlot={(plot) => {
                   handleSavePlotFromPanel(plot);
-                }} onDeletePlot={(plotId) => setPlots((prev) => prev.filter((p) => p.id !== plotId))} />
+                }} />
               )}
             </div>
           </GlassPanel>
@@ -914,11 +928,11 @@ Create 1 chart max — only the single most interesting visualization for this d
               ) : (
                 <PlotsTab plots={plots} onViewPlot={(plot) => {
                   if (plot.chartConfig && plot.chartData) {
-                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData });
+                    setFullscreenPlot({ title: plot.title, chartConfig: plot.chartConfig, chartData: plot.chartData, codeSnippet: plot.codeSnippet });
                   }
                 }} onSavePlot={(plot) => {
                   handleSavePlotFromPanel(plot);
-                }} onDeletePlot={(plotId) => setPlots((prev) => prev.filter((p) => p.id !== plotId))} />
+                }} />
               )}
             </div>
           </GlassPanel>
@@ -1338,8 +1352,20 @@ Create 1 chart max — only the single most interesting visualization for this d
                 )}
               </button>
             ) : (
-              /* File uploaded - show text input */
+              /* File uploaded - show text input with upload button */
               <div className="flex items-center gap-2.5">
+                <button
+                  onClick={handleFileAttach}
+                  disabled={isLoading}
+                  className="w-[36px] h-[36px] rounded-full flex items-center justify-center shrink-0 transition-all hover:opacity-90 disabled:opacity-50"
+                  style={{
+                    backgroundColor: 'rgba(147,51,234,0.12)',
+                    border: '1px solid rgba(147,51,234,0.25)',
+                  }}
+                  title="Upload new file"
+                >
+                  <Upload className="w-[15px] h-[15px]" style={{ color: '#a1a1aa' }} />
+                </button>
                 <div className="flex-1 flex items-center gap-0.5 rounded-full px-6 py-2.5" style={{ backgroundColor: '#1a1625', border: '1px solid rgba(113,113,122,0.3)' }}>
                   <input
                     type="text"
@@ -1587,6 +1613,16 @@ Create 1 chart max — only the single most interesting visualization for this d
         </div>
       )}
 
+      {/* Off-screen export container for direct PNG save */}
+      {exportPlot && createPortal(
+        <div style={{ position: 'fixed', left: '-9999px', top: 0, width: 900, height: 600, pointerEvents: 'none' }}>
+          <div ref={offscreenExportRef} style={{ width: '100%', height: '100%', backgroundColor: '#1e1b2e', padding: 16 }}>
+            <Chart config={exportPlot.chartConfig} data={exportPlot.chartData} />
+          </div>
+        </div>,
+        document.body
+      )}
+
       {/* Fullscreen plot modal */}
       {fullscreenPlot && createPortal(
         <div
@@ -1633,6 +1669,31 @@ Create 1 chart max — only the single most interesting visualization for this d
                 {fullscreenPlot.title}
               </span>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0, marginLeft: 12 }}>
+                {fullscreenPlot.codeSnippet && (
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(fullscreenPlot.codeSnippet!);
+                      setCodeCopiedModal(true);
+                      setTimeout(() => setCodeCopiedModal(false), 2000);
+                    }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '6px 14px',
+                      borderRadius: 8,
+                      backgroundColor: codeCopiedModal ? 'rgba(34,197,94,0.15)' : 'rgba(147,51,234,0.15)',
+                      color: codeCopiedModal ? '#22c55e' : '#e4e4e7',
+                      fontSize: 13,
+                      fontWeight: 510,
+                      border: `1px solid ${codeCopiedModal ? 'rgba(34,197,94,0.3)' : 'rgba(147,51,234,0.3)'}`,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {codeCopiedModal ? <Check className="w-3.5 h-3.5" /> : <Code className="w-3.5 h-3.5" />}
+                    {codeCopiedModal ? 'Copied!' : 'Copy Code'}
+                  </button>
+                )}
                 <button
                   onClick={handleSavePlotPng}
                   style={{

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, BarChart3, Trash2, Download } from "lucide-react";
+import { Search, BarChart3, Download, Code, Check } from "lucide-react";
 import { MarkdownLatex } from "./MarkdownLatex";
 import { Chart, ChartConfig } from "./Chart";
 
@@ -12,13 +12,14 @@ export interface PlotData {
   path?: string;
   chartConfig?: ChartConfig;
   chartData?: Record<string, unknown>[];
+  codeSnippet?: string;
 }
 
 interface PlotsTabProps {
   plots: PlotData[];
   onViewPlot?: (plot: PlotData) => void;
-  onDeletePlot?: (plotId: number) => void;
   onSavePlot?: (plot: PlotData) => void;
+  onCopyCode?: (plot: PlotData) => void;
 }
 
 function PlotChart({ plot }: { plot: PlotData }) {
@@ -106,14 +107,25 @@ function ExpandedPlot({
 function PlotCard({
   plot,
   onView,
-  onDelete,
   onSave,
+  onCopyCode,
 }: {
   plot: PlotData;
   onView: () => void;
-  onDelete?: () => void;
   onSave?: () => void;
+  onCopyCode?: () => void;
 }) {
+  const [codeCopied, setCodeCopied] = useState(false);
+
+  const handleCopyCode = () => {
+    if (!plot.codeSnippet) return;
+    navigator.clipboard.writeText(plot.codeSnippet).then(() => {
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 2000);
+    });
+    onCopyCode?.();
+  };
+
   return (
     <div
       className="rounded-[20px] shrink-0 w-full overflow-hidden"
@@ -153,6 +165,22 @@ function PlotCard({
             >
               View
             </button>
+            {plot.codeSnippet && (
+              <button
+                onClick={handleCopyCode}
+                className="h-[24px] w-[24px] rounded-md flex items-center justify-center hover:opacity-90 transition-all"
+                style={{
+                  color: codeCopied ? '#22c55e' : '#a1a1aa',
+                  backgroundColor: codeCopied ? 'rgba(34,197,94,0.15)' : 'rgba(147,51,234,0.08)',
+                  border: `1px solid ${codeCopied ? 'rgba(34,197,94,0.3)' : 'rgba(147,51,234,0.2)'}`,
+                }}
+                onMouseEnter={(e) => { if (!codeCopied) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.2)'; e.currentTarget.style.color = '#e4e4e7'; } }}
+                onMouseLeave={(e) => { if (!codeCopied) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.08)'; e.currentTarget.style.color = '#a1a1aa'; } }}
+                title={codeCopied ? "Copied!" : "Copy Python code"}
+              >
+                {codeCopied ? <Check className="w-3 h-3" /> : <Code className="w-3 h-3" />}
+              </button>
+            )}
             {onSave && (
               <button
                 onClick={onSave}
@@ -169,21 +197,6 @@ function PlotCard({
                 <Download className="w-3 h-3" />
               </button>
             )}
-            {onDelete && (
-              <button
-                onClick={onDelete}
-                className="h-[24px] w-[24px] rounded-md flex items-center justify-center hover:opacity-90 transition-all"
-                style={{
-                  color: '#a1a1aa',
-                  backgroundColor: 'rgba(239,68,68,0.08)',
-                  border: '1px solid rgba(239,68,68,0.2)',
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.2)'; e.currentTarget.style.color = '#ef4444'; }}
-                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(239,68,68,0.08)'; e.currentTarget.style.color = '#a1a1aa'; }}
-              >
-                <Trash2 className="w-3 h-3" />
-              </button>
-            )}
           </div>
         </div>
       </div>
@@ -191,7 +204,7 @@ function PlotCard({
   );
 }
 
-export function PlotsTab({ plots, onViewPlot, onDeletePlot, onSavePlot }: PlotsTabProps) {
+export function PlotsTab({ plots, onViewPlot, onSavePlot, onCopyCode }: PlotsTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
 
   const filteredPlots = plots.filter((plot) => {
@@ -255,7 +268,7 @@ export function PlotsTab({ plots, onViewPlot, onDeletePlot, onSavePlot }: PlotsT
               plot={plot}
               onView={() => onViewPlot?.(plot)}
               onSave={onSavePlot ? () => onSavePlot(plot) : undefined}
-              onDelete={onDeletePlot ? () => onDeletePlot(plot.id) : undefined}
+              onCopyCode={onCopyCode ? () => onCopyCode(plot) : undefined}
             />
           ))}
         </div>

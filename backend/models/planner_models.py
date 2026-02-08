@@ -56,6 +56,7 @@ class PlotInfo(BaseModel):
     summary: Optional[str] = None
     chart_config: Optional[ChartConfig] = None
     chart_data: Optional[list[dict]] = None
+    code_snippet: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
