@@ -272,17 +272,6 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId }: D
             style={{ fontWeight: 510, color: '#e4e4e7' }}
           />
         </div>
-        {/* Export CSV */}
-        <button
-          onClick={handleExportCsv}
-          title="Export as CSV"
-          className="shrink-0 w-[24px] h-[24px] rounded-md flex items-center justify-center"
-          style={{ color: '#a1a1aa', backgroundColor: 'rgba(147,51,234,0.08)', border: '1px solid rgba(147,51,234,0.2)' }}
-          onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.2)'; e.currentTarget.style.color = '#e4e4e7'; }}
-          onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.08)'; e.currentTarget.style.color = '#a1a1aa'; }}
-        >
-          <Download className="w-3 h-3" />
-        </button>
       </div>
 
       {/* Active filters bar */}
@@ -405,7 +394,7 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId }: D
         </table>
       </div>
 
-      {/* Footer info */}
+      {/* Footer — always visible */}
       <div className="shrink-0 px-5 py-2 flex items-center justify-between relative z-20" style={{ borderTop: '1px solid rgba(147,51,234,0.12)' }}>
         <p className="text-[10px]" style={{ color: '#a1a1aa' }}>
           {hasActiveFilters || searchQuery
@@ -416,12 +405,26 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId }: D
           }
           {displayedData.length < sortedData.length && ` (showing ${displayedData.length})`}
         </p>
-        {isLoadingAll && (
-          <div className="flex items-center gap-1.5">
-            <Loader2 className="w-3 h-3 animate-spin" style={{ color: '#9333ea' }} />
-            <span className="text-[10px]" style={{ color: '#a1a1aa' }}>Loading all rows...</span>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {isLoadingAll && (
+            <div className="flex items-center gap-1.5">
+              <Loader2 className="w-3 h-3 animate-spin" style={{ color: '#9333ea' }} />
+              <span className="text-[10px]" style={{ color: '#a1a1aa' }}>Loading...</span>
+            </div>
+          )}
+          <button
+            onClick={handleExportCsv}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-all hover:opacity-90"
+            style={{
+              background: 'linear-gradient(135deg, rgba(147,51,234,0.4) 0%, rgba(107,33,168,0.5) 100%)',
+              border: '1px solid rgba(147,51,234,0.35)',
+              boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
+            }}
+          >
+            <Download className="w-3 h-3" style={{ color: '#e4e4e7' }} />
+            <span className="text-[10px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>Export CSV</span>
+          </button>
+        </div>
       </div>
 
       {/* Column filter dropdown — portalled */}
