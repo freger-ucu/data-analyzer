@@ -256,6 +256,7 @@ Guidelines:
         # Explicit state object for this run
         current_df = df.copy()
         plots: list[PlotInfo] = []  # Keep typed list for .title access
+        plot_failures = 0  # Track create_plot failures to cap retries
         data_context = self._build_data_context(current_df, filename)
         state = PlannerState(
             user_message=user_message,
@@ -538,7 +539,14 @@ Use the available tools to fulfill this request. Always call finish() when done.
                                 }
                             )
                         elif result.get("is_error"):
-                            safe_print(f"[Planner] create_plot error: {result['content']}")
+                            plot_failures += 1
+                            safe_print(f"[Planner] create_plot error (attempt {plot_failures}): {result['content']}")
+                            if plot_failures >= 2:
+                                # Force the LLM to stop retrying charts
+                                tool_results[-1]["content"] += (
+                                    "\n\nCHART FAILED TWICE. Do NOT retry create_plot again. "
+                                    "Send a brief 1-2 sentence summary of the key insight via write_to_chat, then call finish()."
+                                )
                             yield ChatEvent(
                                 event_type="error",
                                 data={"message": result["content"]}

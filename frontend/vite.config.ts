@@ -58,7 +58,7 @@
       open: true,
       proxy: {
         '/api': {
-          target: 'http://backend:8001',
+          target: 'http://localhost:8001',
           changeOrigin: true,
         },
       },
