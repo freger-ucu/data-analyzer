@@ -6,7 +6,7 @@ from backend.config import get_settings
 settings = get_settings()
 
 app = FastAPI(
-    title="Agent Forge - Data Analyzer",
+    title="AI Data Analyzer",
     description="AI Agent for analyzing datasets",
     version="0.1.0",
 )

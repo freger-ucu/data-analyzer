@@ -1287,28 +1287,6 @@ Perform a concise first-look analysis of this dataset. Keep it SHORT — max 2 p
                               <><Copy className="w-3 h-3" /> Copy</>
                             )}
                           </button>
-                          {msg.judgeVerdict && (
-                            <div
-                              className="flex items-center gap-1.5"
-                              style={{ fontSize: 10, color: '#71717a' }}
-                              title={`Quality: ${msg.judgeVerdict.verdict}\nRelevance: ${msg.judgeVerdict.relevance}/10\nAccuracy: ${msg.judgeVerdict.accuracy}/10\nCompleteness: ${msg.judgeVerdict.completeness}/10\n${msg.judgeVerdict.feedback}`}
-                            >
-                              <div
-                                style={{
-                                  width: 6,
-                                  height: 6,
-                                  borderRadius: '50%',
-                                  backgroundColor:
-                                    msg.judgeVerdict.verdict === "pass" ? '#22c55e' :
-                                    msg.judgeVerdict.verdict === "warn" ? '#eab308' :
-                                    '#ef4444',
-                                }}
-                              />
-                              <span>
-                                {msg.judgeVerdict.relevance + msg.judgeVerdict.accuracy + msg.judgeVerdict.completeness}/30
-                              </span>
-                            </div>
-                          )}
                         </div>
                       )}
                       {/* Inline chart */}

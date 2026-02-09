@@ -1,4 +1,4 @@
-# Agent Forge — AI Data Analyzer
+# AI Data Analyzer
 
 An AI-powered data analysis assistant. Upload CSV/Parquet files and explore them through natural language conversation — get statistics, generate visualizations, and discover insights through chat.
 
