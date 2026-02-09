@@ -87,7 +87,7 @@ class TestAutoAnalyzeFlow:
             call_count += 1
             return resp
 
-        with patch("backend.app.agent.graph.call_llm", side_effect=mock_create):
+        with patch("backend.app.agent.graph.call_llm_streaming", side_effect=mock_create):
             await run_agent(
                 session_id=sample_session.id,
                 file_path=sample_csv,
@@ -138,7 +138,7 @@ class TestUserMessageFlow:
             call_count += 1
             return resp
 
-        with patch("backend.app.agent.graph.call_llm", side_effect=mock_create):
+        with patch("backend.app.agent.graph.call_llm_streaming", side_effect=mock_create):
             await run_agent(
                 session_id=sample_session.id,
                 file_path=sample_csv,
@@ -194,7 +194,7 @@ class TestErrorRecovery:
             call_count += 1
             return resp
 
-        with patch("backend.app.agent.graph.call_llm", side_effect=mock_create):
+        with patch("backend.app.agent.graph.call_llm_streaming", side_effect=mock_create):
             await run_agent(
                 session_id=sample_session.id,
                 file_path=sample_csv,
@@ -231,7 +231,7 @@ class TestStopCancellation:
             call_count += 1
             return response_1
 
-        with patch("backend.app.agent.graph.call_llm", side_effect=mock_create):
+        with patch("backend.app.agent.graph.call_llm_streaming", side_effect=mock_create):
             await run_agent(
                 session_id=sample_session.id,
                 file_path=sample_csv,
@@ -248,7 +248,7 @@ class TestStopCancellation:
 
 
 class TestParallelToolCalls:
-    """Agent returns multiple tool_use blocks — all executed sequentially."""
+    """Agent returns multiple tool_use blocks — executed in parallel via asyncio.gather."""
 
     @pytest.mark.asyncio
     async def test_multiple_tools_in_one_step(
@@ -277,7 +277,7 @@ class TestParallelToolCalls:
             call_count += 1
             return resp
 
-        with patch("backend.app.agent.graph.call_llm", side_effect=mock_create):
+        with patch("backend.app.agent.graph.call_llm_streaming", side_effect=mock_create):
             await run_agent(
                 session_id=sample_session.id,
                 file_path=sample_csv,

@@ -21,3 +21,4 @@ class File(Base):
     row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     col_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     columns: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON string
+    profile_data: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON string — column profiles

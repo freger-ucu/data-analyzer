@@ -327,12 +327,40 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
   // WebSocket event handler — ref ensures latest closures without reconnecting
   handleWSEventRef.current = (eventType: string, data: Record<string, unknown>) => {
     switch (eventType) {
+      case "text_delta":
+        responseReceivedRef.current = true;
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.role === "assistant" && (last as Record<string, unknown>)._streaming) {
+            return [
+              ...prev.slice(0, -1),
+              { ...last, text: last.text + (data.delta as string) },
+            ];
+          }
+          return [
+            ...prev,
+            { id: Date.now(), role: "assistant", text: data.delta as string, _streaming: true } as typeof last,
+          ];
+        });
+        break;
+
       case "text":
         responseReceivedRef.current = true;
-        setMessages((prev) => [
-          ...prev,
-          { id: Date.now(), role: "assistant", text: data.text as string },
-        ]);
+        setMessages((prev) => {
+          // Replace streaming message with final text, or append new
+          const last = prev[prev.length - 1];
+          if (last && last.role === "assistant" && (last as Record<string, unknown>)._streaming) {
+            const { _streaming, ...rest } = last as Record<string, unknown>;
+            return [
+              ...prev.slice(0, -1),
+              { ...rest, text: data.text as string } as typeof last,
+            ];
+          }
+          return [
+            ...prev,
+            { id: Date.now(), role: "assistant", text: data.text as string },
+          ];
+        });
         break;
 
       case "plot":

@@ -2,6 +2,8 @@
 
 import json
 
+MAX_CONTEXT_ROWS = 5  # Max rows to replay in cross-turn context
+
 
 PROMPT_1 = """\
 You are a data analyst. The user just uploaded a dataset. Your job is to explore it and provide a concise initial analysis.
@@ -11,22 +13,23 @@ You are a data analyst. The user just uploaded a dataset. Your job is to explore
 Work in two phases. IMPORTANT: complete each phase (queries + output) before starting the next. Do not batch all queries upfront.
 
 Phase 1 — Dataset Summary:
-1. Run a few sql_query calls to understand the dataset: sample rows, basic statistics, null counts.
-2. Call output_text with a summary. Format:
+1. Review the data profile above. Run 1-2 targeted sql_query calls only if you spot something worth investigating deeper (e.g. checking distributions, correlations, or outliers).
+2. Call output_text with a brief summary in two short paragraphs:
 
-Start with a bold one-liner: what this dataset is, row count, column count.
+First paragraph: a bold one-liner — what the dataset is, row count, columns.
 
-Then write a short paragraph (3-5 sentences) covering the key variables, notable patterns or insights (with specific numbers), and data quality. Use bold for emphasis on key terms. Every sentence should carry a concrete number or fact — no filler. No bullet points, no section headers.
+Second paragraph: 2-3 sentences with the most interesting finding or pattern backed by a specific number. Use bold for key terms. No bullet points, no section headers. Keep it short — save detail for the column table.
 
 Phase 2 — Column Dictionary:
-3. Run sql_query calls to analyze columns in detail: unique counts, typical values, distributions.
+3. Use the profile data above to build the column dictionary. Run a sql_query only if you need additional detail (e.g. value distributions for categorical columns).
 4. Call output_table with a per-column analysis. Columns: Column, Type, Non-Null Count, Unique Count, Description, Typical Values, Issues.
    - Cover every column. "Issues" should flag: high null rates, suspicious outliers, mixed types, constant columns. Write "None" if clean.
 
 Then call finalize with a short descriptive session title (e.g. "E-commerce Sales Q4 2024", "Customer Churn Analysis").
 
 Guidelines:
-- Keep queries focused — a few per phase, not dozens at once.
+- The data profile already contains null counts, unique counts, statistics, and sample values — use it instead of querying for basics.
+- Keep queries focused and targeted — skip queries for information already in the profile.
 - Keep the summary concise — highlight what matters, skip the obvious.
 - Only SELECT queries are allowed. Never attempt to modify data."""
 
@@ -58,6 +61,7 @@ def build_data_summary(
     row_count: int,
     col_count: int,
     column_types: dict[str, str],
+    column_profiles: dict[str, dict] | None = None,
 ) -> str:
     """Build the data summary block injected into system prompts."""
     lines = [
@@ -67,7 +71,24 @@ def build_data_summary(
         f"Columns ({col_count}):",
     ]
     for col_name, col_type in column_types.items():
-        lines.append(f"  - {col_name}: {col_type}")
+        line = f"  - {col_name}: {col_type}"
+        if column_profiles and col_name in column_profiles:
+            p = column_profiles[col_name]
+            parts = []
+            null_count = p.get("null_count", 0)
+            non_null = row_count - null_count
+            parts.append(f"{non_null} non-null")
+            if null_count > 0:
+                parts.append(f"{null_count} nulls")
+            parts.append(f"{p.get('unique_count', '?')} unique")
+            if "mean" in p and p["mean"] is not None:
+                stats = f"min={p.get('min')}, max={p.get('max')}, mean={p.get('mean')}, median={p.get('median')}"
+                parts.append(stats)
+            samples = p.get("sample_values", [])
+            if samples:
+                parts.append(f"e.g. {', '.join(samples[:3])}")
+            line += f" ({'; '.join(parts)})"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -101,10 +122,7 @@ def build_messages_for_llm(db_messages: list[dict]) -> list[dict]:
 
         elif role == "assistant":
             if msg_type == "reasoning":
-                messages.append({
-                    "role": "assistant",
-                    "content": f"[Internal reasoning]: {text}",
-                })
+                continue  # Don't replay internal reasoning across turns
             elif msg_type == "query_result":
                 # Include the query and results so agent knows what it already ran
                 plot_data = msg.get("plot_data")
@@ -112,8 +130,10 @@ def build_messages_for_llm(db_messages: list[dict]) -> list[dict]:
                     try:
                         parsed = json.loads(plot_data) if isinstance(plot_data, str) else plot_data
                         query = parsed.get("query", "")
+                        columns = parsed.get("columns", [])
                         rows = parsed.get("rows", [])
-                        content = f"[SQL query: {query}]\n[Result: {len(rows)} rows returned]\n{json.dumps(rows[:20])}"
+                        preview = rows[:MAX_CONTEXT_ROWS]
+                        content = f"[SQL query: {query}]\n[Result: {len(rows)} rows, columns: {columns}]\n{json.dumps(preview)}"
                     except (json.JSONDecodeError, TypeError):
                         content = f"[Query result]: {text}"
                 else:

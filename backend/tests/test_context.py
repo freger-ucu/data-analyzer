@@ -1,5 +1,7 @@
 """Tests for context building and prompt selection."""
 
+import json
+
 import pytest
 
 from backend.app.agent.context import build_messages_for_llm, build_data_summary, get_system_prompt
@@ -73,19 +75,21 @@ class TestBuildMessagesForLLM:
         assistant_msgs = [m for m in result if m["role"] == "assistant"]
         assert len(assistant_msgs) == 1
 
-    def test_includes_reasoning_steps(self):
+    def test_excludes_reasoning_from_context(self):
         db_messages = [
             {"role": "user", "type": "text", "text": "Hello"},
             {"role": "assistant", "type": "reasoning", "text": "I should query the averages first."},
             {"role": "assistant", "type": "text", "text": "The average is 85."},
         ]
         result = build_messages_for_llm(db_messages)
-        # Reasoning should be present in context
+        # Reasoning should NOT be replayed in cross-turn context
         all_text = " ".join(
             m["content"] if isinstance(m["content"], str) else str(m["content"])
             for m in result if m["role"] == "assistant"
         )
-        assert "query the averages" in all_text
+        assert "query the averages" not in all_text
+        # But assistant text should still be present
+        assert "average is 85" in all_text
 
     def test_includes_query_result_messages(self):
         db_messages = [
@@ -111,5 +115,33 @@ class TestBuildMessagesForLLM:
         ]
         result = build_messages_for_llm(db_messages)
         roles = [m["role"] for m in result]
-        assert roles == ["user", "assistant", "assistant", "user"] or \
-               roles == ["user", "assistant", "user"]  # if reasoning merged with assistant
+        # Reasoning is excluded, so only user-assistant-user
+        assert roles == ["user", "assistant", "user"]
+
+    def test_query_result_truncated_to_max_context_rows(self):
+        rows = [[i, i * 10] for i in range(50)]
+        db_messages = [
+            {"role": "user", "type": "text", "text": "Show data"},
+            {
+                "role": "assistant",
+                "type": "query_result",
+                "text": "All rows",
+                "plot_data": json.dumps({
+                    "query": "SELECT * FROM data",
+                    "columns": ["id", "value"],
+                    "rows": rows,
+                }),
+            },
+        ]
+        result = build_messages_for_llm(db_messages)
+        assistant_msg = [m for m in result if m["role"] == "assistant"][0]
+        # Should only contain up to MAX_CONTEXT_ROWS (5) rows of data
+        assert "50 rows" in assistant_msg["content"]
+        assert "columns" in assistant_msg["content"]
+        # Count actual data rows in the JSON portion
+        import re
+        # The truncated preview should have 5 rows
+        content = assistant_msg["content"]
+        json_part = content.split("\n")[-1]
+        parsed_rows = json.loads(json_part)
+        assert len(parsed_rows) == 5

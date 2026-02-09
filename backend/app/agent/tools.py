@@ -17,7 +17,7 @@ MAX_QUERY_ROWS = 50
 MAX_PLOT_ROWS = 100
 
 
-def _create_duckdb_connection(file_path: str) -> duckdb.DuckDBPyConnection:
+def create_duckdb_connection(file_path: str) -> duckdb.DuckDBPyConnection:
     """Create a DuckDB connection with a `data` view pointing to the file."""
     abs_path = os.path.abspath(file_path)
     ext = os.path.splitext(file_path)[1].lower()
@@ -34,6 +34,7 @@ async def execute_sql_query(
     query: str,
     description: str,
     file_path: str,
+    conn: duckdb.DuckDBPyConnection | None = None,
     max_rows: int = MAX_QUERY_ROWS,
 ) -> dict[str, Any]:
     """Execute a SQL query against the dataset. Status is sent from graph.py before calling this."""
@@ -51,14 +52,20 @@ async def execute_sql_query(
 
     def _run_query() -> dict[str, Any]:
         """Run query synchronously in a thread so the event loop stays free."""
-        conn = _create_duckdb_connection(file_path)
+        # Use a cursor from shared connection (thread-safe) or create a standalone one
+        if conn is not None:
+            cursor = conn.cursor()
+            owns_connection = False
+        else:
+            cursor = create_duckdb_connection(file_path)
+            owns_connection = True
         try:
             wrapped = f"SELECT * FROM ({query}) _sub LIMIT {max_rows}"
-            result = conn.execute(wrapped)
+            result = cursor.execute(wrapped)
             columns = [desc[0] for desc in result.description]
             rows = [list(row) for row in result.fetchall()]
 
-            count_result = conn.execute(f"SELECT COUNT(*) FROM ({query}) _sub").fetchone()
+            count_result = cursor.execute(f"SELECT COUNT(*) FROM ({query}) _sub").fetchone()
             total_rows = count_result[0] if count_result else len(rows)
 
             for row in rows:
@@ -81,7 +88,9 @@ async def execute_sql_query(
                 "row_count": 0,
             }
         finally:
-            conn.close()
+            cursor.close()
+            if owns_connection:
+                pass  # cursor IS the connection in fallback case, already closed
 
     result = await asyncio.to_thread(_run_query)
     return result

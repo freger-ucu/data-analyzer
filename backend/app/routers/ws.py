@@ -1,6 +1,7 @@
 import json
 import asyncio
 from functools import partial
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
@@ -73,6 +74,9 @@ async def websocket_chat(
     finally:
         db.close()
 
+    # Build file_metadata from stored profile (avoids re-scanning at agent start)
+    file_metadata = _build_file_metadata(file_record)
+
     await websocket.accept()
 
     try:
@@ -88,9 +92,9 @@ async def websocket_chat(
             msg_type = data.get("type")
 
             if msg_type == "message":
-                await handle_message(websocket, session_id, file_path, data.get("text", ""))
+                await handle_message(websocket, session_id, file_path, file_metadata, data.get("text", ""))
             elif msg_type == "auto_analyze":
-                await handle_auto_analyze(websocket, session_id, file_path)
+                await handle_auto_analyze(websocket, session_id, file_path, file_metadata)
             elif msg_type == "stop":
                 await handle_stop(websocket, session_id)
             else:
@@ -109,7 +113,7 @@ async def websocket_chat(
             pass
 
 
-async def handle_message(ws: WebSocket, session_id: str, file_path: str, text: str) -> None:
+async def handle_message(ws: WebSocket, session_id: str, file_path: str, file_metadata: dict[str, Any], text: str) -> None:
     db = SessionLocal()
     try:
         save_user_message(db, session_id, text)
@@ -125,6 +129,7 @@ async def handle_message(ws: WebSocket, session_id: str, file_path: str, text: s
                 is_initial_analysis=False,
                 send_event=_send,
                 db=db,
+                file_metadata=file_metadata,
                 db_messages=db_messages,
             )
         )
@@ -143,7 +148,7 @@ async def handle_message(ws: WebSocket, session_id: str, file_path: str, text: s
         db.close()
 
 
-async def handle_auto_analyze(ws: WebSocket, session_id: str, file_path: str) -> None:
+async def handle_auto_analyze(ws: WebSocket, session_id: str, file_path: str, file_metadata: dict[str, Any]) -> None:
     db = SessionLocal()
     try:
         _send = partial(send_event, ws)
@@ -155,6 +160,7 @@ async def handle_auto_analyze(ws: WebSocket, session_id: str, file_path: str) ->
                 is_initial_analysis=True,
                 send_event=_send,
                 db=db,
+                file_metadata=file_metadata,
             )
         )
         _active_tasks[session_id] = task
@@ -178,3 +184,29 @@ async def handle_stop(ws: WebSocket, session_id: str) -> None:
         task.cancel()
     else:
         await send_event(ws, "done", {"data_updated": False})
+
+
+def _build_file_metadata(file_record: File) -> dict[str, Any]:
+    """Build file_metadata dict from the DB file record + stored profile."""
+    profile = {}
+    if file_record.profile_data:
+        try:
+            profile = json.loads(file_record.profile_data)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    column_types = profile.get("column_types", {})
+    # Fallback: if no profile yet, build column_types from columns list
+    if not column_types and file_record.columns:
+        try:
+            cols = json.loads(file_record.columns)
+            column_types = {c: "UNKNOWN" for c in cols}
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return {
+        "row_count": file_record.row_count,
+        "col_count": file_record.col_count,
+        "column_types": column_types,
+        "column_profiles": profile.get("column_profiles"),
+    }

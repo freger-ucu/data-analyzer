@@ -71,6 +71,10 @@ def upload_file(
         row_count=file_info["row_count"],
         col_count=file_info["column_count"],
         columns=json.dumps(file_info["columns"]),
+        profile_data=json.dumps({
+            "column_types": file_info["column_types"],
+            "column_profiles": file_info["column_profiles"],
+        }),
     )
     db.add(file_record)
     db.commit()

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session as DBSession
 from backend.app.agent.context import build_data_summary, get_system_prompt, build_messages_for_llm
 from backend.app.agent.persistence import save_reasoning, save_tool_message
 from backend.app.agent.tools import (
+    create_duckdb_connection,
     execute_sql_query,
     execute_output_text,
     execute_output_table,
@@ -105,7 +106,7 @@ async def call_llm(
     messages: list[dict],
     tools: list[dict],
 ) -> Any:
-    """Call the Anthropic API with tools. Separated for easy mocking in tests."""
+    """Call the Anthropic API with tools (non-streaming). Kept for test mocking."""
     return await client.messages.create(
         model=MODEL,
         max_tokens=4096,
@@ -113,6 +114,93 @@ async def call_llm(
         messages=messages,
         tools=tools,
     )
+
+
+async def call_llm_streaming(
+    client: anthropic.AsyncAnthropic,
+    system_prompt: str,
+    messages: list[dict],
+    tools: list[dict],
+    send_event: SendEvent,
+) -> Any:
+    """Call the Anthropic API with streaming. Sends text_delta events for output_text tool content."""
+    current_tool_name: str | None = None
+    streaming_output_text = False
+    # For incremental text extraction from partial JSON
+    text_buffer = ""
+    text_value_start = -1  # char position where the text string content begins
+    text_sent_count = 0  # how many chars of text content we've already sent
+
+    async with client.messages.stream(
+        model=MODEL,
+        max_tokens=4096,
+        system=system_prompt,
+        messages=messages,
+        tools=tools,
+    ) as stream:
+        async for event in stream:
+            if event.type == "content_block_start":
+                block = event.content_block
+                if hasattr(block, "type") and block.type == "tool_use":
+                    current_tool_name = block.name
+                    streaming_output_text = (current_tool_name == "output_text")
+                    text_buffer = ""
+                    text_value_start = -1
+                    text_sent_count = 0
+                else:
+                    current_tool_name = None
+                    streaming_output_text = False
+
+            elif event.type == "content_block_delta":
+                delta = event.delta
+                if not (hasattr(delta, "type") and delta.type == "input_json_delta" and streaming_output_text):
+                    continue
+
+                text_buffer += delta.partial_json
+
+                # Find where the text string value starts: after "text": "
+                if text_value_start == -1:
+                    for pattern in ('"text": "', '"text":"'):
+                        idx = text_buffer.find(pattern)
+                        if idx != -1:
+                            text_value_start = idx + len(pattern)
+                            break
+
+                if text_value_start == -1:
+                    continue
+
+                # Extract current text content from the opening quote onward.
+                # Hold back last 2 chars to avoid sending the closing "}
+                # which is JSON syntax, not text content. The final "text"
+                # event from tool execution delivers the complete clean text.
+                raw = text_buffer[text_value_start:]
+                sendable = raw[:-2] if len(raw) > 2 else ""
+                if len(sendable) <= text_sent_count:
+                    continue
+
+                new_chunk = sendable[text_sent_count:]
+                # Unescape common JSON string escapes
+                new_chunk = (
+                    new_chunk
+                    .replace("\\n", "\n")
+                    .replace("\\t", "\t")
+                    .replace('\\"', '"')
+                    .replace("\\\\", "\\")
+                )
+                if new_chunk:
+                    await send_event("text_delta", {"delta": new_chunk})
+                    text_sent_count = len(sendable)
+
+            elif event.type == "content_block_stop":
+                streaming_output_text = False
+                current_tool_name = None
+                text_buffer = ""
+                text_value_start = -1
+                text_sent_count = 0
+
+        response = await stream.get_final_message()
+
+    return response
 
 
 async def run_agent(
@@ -153,6 +241,7 @@ async def run_agent(
         row_count=file_metadata["row_count"],
         col_count=file_metadata["col_count"],
         column_types=file_metadata["column_types"],
+        column_profiles=file_metadata.get("column_profiles"),
     )
     system_prompt = get_system_prompt(is_initial_analysis, data_summary)
 
@@ -168,109 +257,170 @@ async def run_agent(
     # Create Anthropic client
     client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
-    # Agent loop
-    for _ in range(MAX_ITERATIONS):
-        response = await call_llm(client, system_prompt, llm_messages, TOOL_DEFINITIONS)
+    # Create a shared DuckDB connection for the entire agent run
+    conn = await asyncio.to_thread(create_duckdb_connection, file_path)
 
-        # Extract reasoning text and tool calls from response
-        reasoning_parts = []
-        tool_calls = []
-        for block in response.content:
-            if isinstance(block, dict):
-                if block["type"] == "text":
-                    reasoning_parts.append(block["text"])
-                elif block["type"] == "tool_use":
-                    tool_calls.append(block)
-            else:
-                if block.type == "text":
-                    reasoning_parts.append(block.text)
-                elif block.type == "tool_use":
-                    tool_calls.append(block)
+    try:
+        # Agent loop
+        for _ in range(MAX_ITERATIONS):
+            response = await call_llm_streaming(client, system_prompt, llm_messages, TOOL_DEFINITIONS, send_event)
 
-        # Save reasoning if present
-        reasoning_text = "\n".join(reasoning_parts).strip()
-        if reasoning_text:
-            save_reasoning(db, session_id, reasoning_text)
+            # Extract reasoning text and tool calls from response
+            reasoning_parts = []
+            tool_calls = []
+            for block in response.content:
+                if isinstance(block, dict):
+                    if block["type"] == "text":
+                        reasoning_parts.append(block["text"])
+                    elif block["type"] == "tool_use":
+                        tool_calls.append(block)
+                else:
+                    if block.type == "text":
+                        reasoning_parts.append(block.text)
+                    elif block.type == "tool_use":
+                        tool_calls.append(block)
 
-        # No tool calls — agent is done (shouldn't happen normally, but safety net)
-        if not tool_calls:
-            await send_event("done", {"data_updated": False})
-            return
+            # Save reasoning if present
+            reasoning_text = "\n".join(reasoning_parts).strip()
+            if reasoning_text:
+                save_reasoning(db, session_id, reasoning_text)
 
-        # Execute tool calls and collect results
-        tool_results = []
-        finalize_called = False
+            # No tool calls — agent is done (shouldn't happen normally, but safety net)
+            if not tool_calls:
+                await send_event("done", {"data_updated": False})
+                return
 
-        for tc in tool_calls:
-            tool_name = tc["name"] if isinstance(tc, dict) else tc.name
-            tool_input = tc["input"] if isinstance(tc, dict) else tc.input
-            tool_id = tc["id"] if isinstance(tc, dict) else tc.id
+            # Parse tool call metadata
+            parsed_calls = []
+            for tc in tool_calls:
+                tool_name = tc["name"] if isinstance(tc, dict) else tc.name
+                tool_input = tc["input"] if isinstance(tc, dict) else tc.input
+                tool_id = tc["id"] if isinstance(tc, dict) else tc.id
+                parsed_calls.append((tool_id, tool_name, tool_input))
 
-            # Send status before sql_query so user sees what's happening
-            if tool_name == "sql_query" and tool_input.get("description"):
-                await send_event("status", {"message": tool_input["description"]})
-                await asyncio.sleep(0.05)  # let TCP flush the status frame
+            # Send status events before executing
+            for tool_id, tool_name, tool_input in parsed_calls:
+                if tool_name == "sql_query" and tool_input.get("description"):
+                    await send_event("status", {"message": tool_input["description"]})
 
-            result = await _execute_tool(
-                tool_name=tool_name,
-                tool_input=tool_input,
-                file_path=file_path,
-                send_event=send_event,
-                db=db,
-                session_id=session_id,
+            # Execute tool calls in parallel
+            async def _run_tool(tool_name: str, tool_input: dict) -> dict[str, Any]:
+                return await _execute_tool_core(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    file_path=file_path,
+                    send_event=send_event,
+                    db=db,
+                    session_id=session_id,
+                    conn=conn,
+                )
+
+            results = await asyncio.gather(
+                *[_run_tool(name, inp) for _, name, inp in parsed_calls]
             )
 
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tool_id,
-                "content": json.dumps(result),
-            })
+            # Persist and build tool results in original order
+            tool_results = []
+            finalize_called = False
+            for (tool_id, tool_name, tool_input), result in zip(parsed_calls, results):
+                _persist_tool_result(db, session_id, tool_name, tool_input, result)
 
-            if tool_name == "finalize":
-                finalize_called = True
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": json.dumps(result),
+                })
+                if tool_name == "finalize":
+                    finalize_called = True
 
-        # Append assistant message + tool results to conversation
-        # Build assistant content for the messages list
-        assistant_content = []
-        for block in response.content:
-            if isinstance(block, dict):
-                assistant_content.append(block)
-            else:
-                if block.type == "text":
-                    assistant_content.append({"type": "text", "text": block.text})
-                elif block.type == "tool_use":
-                    assistant_content.append({
-                        "type": "tool_use",
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input,
-                    })
+            # Append assistant message + tool results to conversation
+            assistant_content = []
+            for block in response.content:
+                if isinstance(block, dict):
+                    assistant_content.append(block)
+                else:
+                    if block.type == "text":
+                        assistant_content.append({"type": "text", "text": block.text})
+                    elif block.type == "tool_use":
+                        assistant_content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        })
 
-        llm_messages.append({"role": "assistant", "content": assistant_content})
-        llm_messages.append({"role": "user", "content": tool_results})
+            llm_messages.append({"role": "assistant", "content": assistant_content})
+            llm_messages.append({"role": "user", "content": tool_results})
 
-        if finalize_called:
-            return
+            if finalize_called:
+                return
 
-    # Max iterations reached — force done
-    await send_event("done", {"data_updated": False})
+        # Max iterations reached — force done
+        await send_event("done", {"data_updated": False})
+    finally:
+        conn.close()
 
 
-async def _execute_tool(
+async def _execute_tool_core(
     tool_name: str,
     tool_input: dict,
     file_path: str,
     send_event: SendEvent,
     db: DBSession,
     session_id: str,
+    conn=None,
 ) -> dict[str, Any]:
-    """Execute a single tool call and persist the result."""
+    """Execute a single tool call without persisting. Persistence handled by caller."""
     if tool_name == "sql_query":
-        result = await execute_sql_query(
+        return await execute_sql_query(
             query=tool_input["query"],
             description=tool_input["description"],
             file_path=file_path,
+            conn=conn,
         )
+
+    elif tool_name == "output_text":
+        return await execute_output_text(
+            text=tool_input["text"],
+            send_event=send_event,
+        )
+
+    elif tool_name == "output_table":
+        return await execute_output_table(
+            title=tool_input["title"],
+            headers=tool_input["headers"],
+            rows=tool_input["rows"],
+            send_event=send_event,
+        )
+
+    elif tool_name == "create_plot":
+        return await execute_create_plot(
+            title=tool_input["title"],
+            vega_lite_spec=tool_input["vega_lite_spec"],
+            send_event=send_event,
+        )
+
+    elif tool_name == "finalize":
+        return await execute_finalize(
+            session_title=tool_input.get("session_title"),
+            send_event=send_event,
+            db=db,
+            session_id=session_id,
+        )
+
+    else:
+        return {"error": f"Unknown tool: {tool_name}"}
+
+
+def _persist_tool_result(
+    db: DBSession,
+    session_id: str,
+    tool_name: str,
+    tool_input: dict,
+    result: dict[str, Any],
+) -> None:
+    """Persist a tool result to the database. Called sequentially after parallel execution."""
+    if tool_name == "sql_query":
         save_tool_message(
             db=db,
             session_id=session_id,
@@ -283,13 +433,7 @@ async def _execute_tool(
                 "row_count": result.get("row_count", 0),
             }),
         )
-        return result
-
     elif tool_name == "output_text":
-        result = await execute_output_text(
-            text=tool_input["text"],
-            send_event=send_event,
-        )
         save_tool_message(
             db=db,
             session_id=session_id,
@@ -297,15 +441,7 @@ async def _execute_tool(
             text=tool_input["text"],
             plot_data=None,
         )
-        return result
-
     elif tool_name == "output_table":
-        result = await execute_output_table(
-            title=tool_input["title"],
-            headers=tool_input["headers"],
-            rows=tool_input["rows"],
-            send_event=send_event,
-        )
         save_tool_message(
             db=db,
             session_id=session_id,
@@ -316,14 +452,7 @@ async def _execute_tool(
                 "rows": tool_input["rows"],
             }),
         )
-        return result
-
     elif tool_name == "create_plot":
-        result = await execute_create_plot(
-            title=tool_input["title"],
-            vega_lite_spec=tool_input["vega_lite_spec"],
-            send_event=send_event,
-        )
         save_tool_message(
             db=db,
             session_id=session_id,
@@ -334,19 +463,7 @@ async def _execute_tool(
                 "vega_lite_spec": tool_input["vega_lite_spec"],
             }),
         )
-        return result
-
-    elif tool_name == "finalize":
-        result = await execute_finalize(
-            session_title=tool_input.get("session_title"),
-            send_event=send_event,
-            db=db,
-            session_id=session_id,
-        )
-        return result
-
-    else:
-        return {"error": f"Unknown tool: {tool_name}"}
+    # finalize doesn't need persistence — it updates session title inline
 
 
 def _get_file_metadata(file_path: str) -> dict[str, Any]:
