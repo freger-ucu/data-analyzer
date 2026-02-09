@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { Search, ChevronDown, Upload, Loader2, Filter, X, Download, Maximize2 } from "lucide-react";
+import { Search, ChevronDown, Upload, Filter, X, Download, Maximize2 } from "lucide-react";
 
 interface FileInfo {
   filename: string;
@@ -12,18 +12,15 @@ interface FileInfo {
 
 interface DataTabProps {
   fileInfo: FileInfo | null;
-  sessionId: string | null;
   onViewFullData?: () => void;
 }
 
 const RENDER_CHUNK = 200;
 
-export function DataTab({ fileInfo, sessionId, onViewFullData }: DataTabProps) {
+export function DataTab({ fileInfo, onViewFullData }: DataTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortColumn, setSortColumn] = useState<string | null>(null);
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
-  const [allRows, setAllRows] = useState<Record<string, unknown>[] | null>(null);
-  const [isLoadingAll, setIsLoadingAll] = useState(false);
   const [visibleCount, setVisibleCount] = useState(RENDER_CHUNK);
   const [columnFilters, setColumnFilters] = useState<Record<string, Set<string>>>({});
   const [filterDropdownCol, setFilterDropdownCol] = useState<string | null>(null);
@@ -31,29 +28,10 @@ export function DataTab({ fileInfo, sessionId, onViewFullData }: DataTabProps) {
   const filterBtnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Auto-fetch all rows when sessionId or version changes
-  useEffect(() => {
-    if (!sessionId || !fileInfo) return;
-    // Only fetch if there are more rows than preview
-    if (fileInfo.row_count <= fileInfo.preview.length) {
-      setAllRows(null);
-      return;
-    }
-    setIsLoadingAll(true);
-    setAllRows(null);
-    fetch(`/api/preview/${sessionId}?rows=99999`)
-      .then(res => res.json())
-      .then(data => {
-        setAllRows(data.preview);
-        setIsLoadingAll(false);
-      })
-      .catch(() => setIsLoadingAll(false));
-  }, [sessionId, fileInfo?.row_count]);
-
   // Reset visible count when data/search/sort changes
   useEffect(() => {
     setVisibleCount(RENDER_CHUNK);
-  }, [searchQuery, sortColumn, sortDirection, allRows]);
+  }, [searchQuery, sortColumn, sortDirection, fileInfo?.preview]);
 
   // Infinite scroll: load more rows when user scrolls near bottom
   const handleScroll = useCallback(() => {
@@ -66,13 +44,13 @@ export function DataTab({ fileInfo, sessionId, onViewFullData }: DataTabProps) {
 
   // Get unique values for a column (for filter dropdown)
   const getUniqueValues = useCallback((col: string) => {
-    const rows = allRows || fileInfo?.preview || [];
+    const rows = fileInfo?.preview || [];
     const uniqueSet = new Set<string>();
     for (const row of rows) {
       uniqueSet.add(String(row[col] ?? "(empty)"));
     }
     return Array.from(uniqueSet).sort();
-  }, [allRows, fileInfo?.preview]);
+  }, [fileInfo?.preview]);
 
   // Check if any column filters are active
   const hasActiveFilters = Object.keys(columnFilters).length > 0;
@@ -111,7 +89,7 @@ export function DataTab({ fileInfo, sessionId, onViewFullData }: DataTabProps) {
   // Export data as CSV
   const handleExportCsv = () => {
     if (!fileInfo) return;
-    const rows = allRows || fileInfo.preview;
+    const rows = fileInfo.preview;
     const cols = fileInfo.columns;
     const csvRows = [cols.join(",")];
     for (const row of rows) {
@@ -144,7 +122,7 @@ export function DataTab({ fileInfo, sessionId, onViewFullData }: DataTabProps) {
   }
 
   const columns = fileInfo.columns;
-  const data = allRows || fileInfo.preview;
+  const data = fileInfo.preview;
 
   const handleSort = (column: string) => {
     if (sortColumn === column) {
@@ -329,19 +307,11 @@ export function DataTab({ fileInfo, sessionId, onViewFullData }: DataTabProps) {
         <p className="text-[10px]" style={{ color: '#a1a1aa' }}>
           {hasActiveFilters || searchQuery
             ? `${sortedData.length} of ${data.length} rows`
-            : allRows
-              ? `${fileInfo.row_count} rows`
-              : `${fileInfo.preview.length} of ${fileInfo.row_count} rows`
+            : `${fileInfo.preview.length} rows (preview)`
           }
           {displayedData.length < sortedData.length && ` (showing ${displayedData.length})`}
         </p>
         <div className="flex items-center gap-2">
-          {isLoadingAll && (
-            <div className="flex items-center gap-1.5">
-              <Loader2 className="w-3 h-3 animate-spin" style={{ color: '#9333ea' }} />
-              <span className="text-[10px]" style={{ color: '#a1a1aa' }}>Loading...</span>
-            </div>
-          )}
           {onViewFullData && (
             <button
               onClick={onViewFullData}

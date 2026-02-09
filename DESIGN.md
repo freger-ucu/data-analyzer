@@ -4,11 +4,23 @@
 Rewriting the backend from scratch. Same stack (Python + FastAPI), completely new API design. Frontend kept, cleaned up.
 
 ## Frontend Changes Made
-- **Removed** hardcoded auto-analysis prompt from App.tsx — frontend now sends `"__auto_analyze__"`, backend owns the prompt
-- **Removed** `getCodeSnippet` fallback — backend must always provide `code_snippet` with plots
-- **Removed** PlotsTab — plots are derived from chat messages via `useMemo`, no separate state/endpoint
-- **Removed** `GET /api/plots` fetch, `handleSavePlotFromPanel`, off-screen export portal, `exportPlot` state
-- **Added** History tab (Data | History) in left sidebar — placeholder, will show session list from `GET /api/sessions`
+- **Removed** hardcoded auto-analysis prompt — frontend sends `"__auto_analyze__"` via WS, backend owns the prompt
+- **Removed** `getCodeSnippet` fallback, PlotsTab, `GET /api/plots` fetch, plot export portal
+- **Removed** SSE streaming (`sendChatMessage`, `handleSSEEvent`) — replaced with WebSocket
+- **Removed** `abortControllerRef` — stop/cancel now via WS `{ type: "stop" }`
+- **Removed** judge system entirely (`JudgeVerdict` interface, event handler, verdict display)
+- **Added** AuthPage — login/signup with JWT, token stored in localStorage
+- **Added** History tab (Data | History) in left sidebar — placeholder, will show session list
+- **Added** WebSocket connection with auto-reconnect (exponential backoff, 5 retries)
+- **Added** Client-side 1 GB file size check before upload
+- **Changed** session creation — now happens on upload (`POST /api/upload`), not on mount
+- **Changed** session restore — single `GET /api/sessions/{id}` call, no session creation fallback
+- **Changed** `handleFileUpload` — queues `auto_analyze` for WS `onopen`, loading state cleared by `done` event
+- **Changed** `handleSend` — synchronous, sends via WS, checks connection state
+- **Changed** `handleNewChat` — synchronous state clear, WS closes via useEffect cleanup
+- **Changed** drag-and-drop blocked when session exists (one file per session, no re-upload)
+- **Changed** fullscreen data modal uses `fileInfo.preview` directly (no full data fetch)
+- **Changed** upload errors surfaced to user with actual backend message
 
 ## Auth
 - **JWT tokens**, stateless
@@ -51,30 +63,37 @@ Rewriting the backend from scratch. Same stack (Python + FastAPI), completely ne
 ### Sessions
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/sessions` | Create new session (authed) |
 | GET | `/api/sessions` | List all user sessions (for History tab) |
-| GET | `/api/sessions/{id}` | Get single session + metadata (restore on mount) |
+| GET | `/api/sessions/{id}` | Get single session (file info + messages + metadata) |
 | DELETE | `/api/sessions/{id}` | Delete session |
+
+- **No `POST /api/sessions`** — sessions are created implicitly by upload
+- `GET /api/sessions/{id}` returns everything needed for restore: `{ id, title, created_at, file: { filename, row_count, column_count, columns, preview }, messages: [...] }`
+- One fetch to restore a session — no separate preview or messages call
 
 ### Upload
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/sessions/{id}/upload` | Upload CSV/Parquet file |
+| POST | `/api/upload` | Upload file → creates session → returns `{ session_id, file: { filename, row_count, column_count, columns, preview } }` |
 
-### Data
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/sessions/{id}/preview` | Data preview (supports `?rows=N&version=current|original`) |
+- **Upload creates the session** — no session exists until a file is uploaded
+- One file per session, no re-upload
+- Frontend cannot chat without a file (input disabled until upload)
+- "New chat" clears state and returns to upload screen
+- DataTab only shows preview rows from the upload response (no full data fetch)
 
 ### Chat
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/sessions/{id}/messages` | Restore chat history |
 | WebSocket | `/api/sessions/{id}/ws` | Chat streaming (replaces SSE) |
 
-### Total: 9 REST endpoints + 1 WebSocket
+- Messages restored inline via `GET /api/sessions/{id}`, no separate messages endpoint
+
+### Total: 6 REST endpoints + 1 WebSocket
 
 ## Dropped Endpoints
+- ~~`POST /api/sessions`~~ — sessions created implicitly by upload
+- ~~`GET /api/sessions/{id}/messages`~~ — messages returned inline by `GET /api/sessions/{id}`
 - ~~`GET /api/plots/{id}`~~ — plots derived from messages
 - ~~`POST /api/chat/{id}/message`~~ — WebSocket owns all message persistence
 - ~~`GET /api/suggestions/{id}`~~ — suggestions come through WebSocket `done` event only
@@ -83,23 +102,66 @@ Rewriting the backend from scratch. Same stack (Python + FastAPI), completely ne
 - ~~`POST /api/query`~~ — queries go through chat, not a separate endpoint
 
 ## Streaming: WebSocket (not SSE)
-- Single WS connection per session: `/api/sessions/{id}/ws`
+- Single WS connection per session: `/api/sessions/{id}/ws?token=xxx`
+- **Auth**: JWT passed as query param on connect — server validates before accepting
+- **Lifecycle**: connect when sessionId is set (after upload or restore), keep alive while session is active, close on new chat / logout
+- **Reconnection**: auto-reconnect with exponential backoff (1s → 2s → 4s → max 30s), cap at 5 retries, then show "Connection lost" error
+- **Stop/Cancel**: client sends `{ type: "stop" }`, server aborts LLM call and sends `done` event to confirm
 - Bidirectional: client sends messages, server streams responses
-- Same event types the frontend already handles: `text`, `plot`, `query_result`, `status`, `done`, `error`, `judge`
-- `done` event includes `suggestions` array (only source of suggestions now)
-- Frontend sends `{ type: "message", text: "..." }` or `{ type: "auto_analyze" }`
-- Server sends `{ event: "text", data: {...} }` etc.
-- Clean stop/cancel via WS close or client `{ type: "stop" }` message
+- Event types: `text`, `plot`, `query_result`, `status`, `done`, `error`, `session_update`
+- **No judge** — removed entirely
+
+### Client → Server messages
+```json
+{ "type": "message", "text": "show me top 10" }
+{ "type": "auto_analyze" }
+{ "type": "stop" }
+```
+
+### Server → Client messages
+```json
+{ "event": "text", "data": { "text": "Here are the top 10..." } }
+{ "event": "plot", "data": { "title": "...", "vega_lite_spec": { ... } } }
+{ "event": "query_result", "data": { "result": [...], "is_error": false } }
+{ "event": "status", "data": { "message": "Running query..." } }
+{ "event": "done", "data": { "data_updated": false } }
+{ "event": "error", "data": { "message": "Something went wrong" } }
+{ "event": "session_update", "data": { "title": "Sales Analysis Q4" } }
+```
 
 ## Message Persistence
 - **Chat endpoint (WebSocket) owns all persistence**
 - No separate "save message" call from frontend
 - Backend saves user messages when received via WS, saves assistant messages as they're generated
-- Frontend only reads messages via `GET /api/sessions/{id}/messages` on session restore
+- Frontend restores messages via `GET /api/sessions/{id}` (inline with session data)
 
 ## Suggestions
 - **Removed entirely for now** — no suggestion chips in frontend, no suggestions endpoint
 - Can re-add later through WebSocket `done` event if needed
+
+## Sessions
+- **Created on upload** — no session exists until user uploads a file (`POST /api/upload`)
+- **No empty sessions** — every session has a file attached
+- **One file per session** — no re-upload; to analyze a different file, start a new session
+- **No chat without data** — chat input disabled until file is uploaded
+- **"New chat" button** clears all state (sessionId, fileInfo, messages) and returns to upload screen
+- **Restore on mount**: frontend checks localStorage for `csv_analyzer_session_id`, calls `GET /api/sessions/{id}` to restore file + messages in one request
+- **Title**: starts as filename, LLM generates a real title after first exchange (backend sends `session_update` event via WS)
+
+## Upload & Files
+- **Storage**: keep original file on disk, DuckDB queries it directly (no import step)
+- **Directory**: `data/{session_id}/original.csv` (or `.parquet`) — nested per session
+- **Size limit**: 1 GB (enforced by backend, matches Docker/nginx config)
+- **Preview**: 500 rows returned in the upload response
+- **Accepted formats**: `.csv`, `.parquet`, `.pq`
+- **Validation on upload**:
+  - File extension check
+  - File not empty
+  - DuckDB can parse it without errors
+  - Column count > 0, row count > 0
+  - Clear error messages: "File is empty", "Could not parse CSV", etc.
+- **Cleanup on session delete**: delete file from disk + all DB rows (session, file, messages)
+- No background cleanup job for now — just delete on `DELETE /api/sessions/{id}`
 
 ## Auto-Analysis
 - Frontend sends `"__auto_analyze__"` via WebSocket after file upload
@@ -110,10 +172,6 @@ Rewriting the backend from scratch. Same stack (Python + FastAPI), completely ne
 - **Removed for now** — single version of the data (the uploaded original)
 - No current/original toggle, no `?version=` query param
 - Can re-add later if data transformation features need it
-- Upload saves original file to disk (never modified)
-- Transformations update `current` version
-- `GET /api/sessions/{id}/preview?version=current|original` serves either
-- `rows=99999` pattern still works but consider adding proper pagination later
 
 ## What to Keep from Old Backend (as reference)
 - DuckDB for query execution — fast, works well for analytical SQL
