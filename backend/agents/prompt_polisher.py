@@ -78,7 +78,6 @@ REFINEMENT GUIDELINES:
 COMMON VAGUE PROMPTS — interpret them as:
 - "what's interesting" / "anything interesting" → "Perform exploratory analysis: compute key statistics for all numeric columns, identify notable patterns, outliers, and correlations"
 - "show me trends" / "trends" → "Show line chart of the main numeric metric over the temporal column (date/time/week/month)"
-- "clean this" / "clean data" / "clean" → "Clean the data: fix column types, remove duplicates, handle missing values, fix anomalies"
 - "compare X and Y" → "Compare X and Y using grouped statistics and a bar chart"
 - "overview" / "summary" / "describe" → "Provide a comprehensive overview: shape, column types, key statistics, missing values, and notable patterns"
 - "correlations" / "what's related" → "Show correlation heatmap and highlight the strongest correlations"
@@ -97,7 +96,7 @@ If rejecting:
     "is_valid": false,
     "prompt_type": "invalid",
     "polished_prompt": "",
-    "rejection_reason": "This prompt is not related to data analysis. Try asking about your data — for example: 'show me a summary', 'what are the trends', or 'clean the data'.",
+    "rejection_reason": "This prompt is not related to data analysis. Try asking about your data — for example: 'show me a summary', 'what are the trends', or 'compare X and Y'.",
     "confidence": 0.9
 }"""
 

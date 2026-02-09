@@ -144,9 +144,20 @@ function PlotCard({
 
   const handleCopyCode = () => {
     const code = plot.codeSnippet || generateFallbackCode(plot);
-    navigator.clipboard.writeText(code).then(() => {
-      setCodeCopied(true);
-      setTimeout(() => setCodeCopied(false), 2000);
+    const copyText = async (text: string) => {
+      if (navigator.clipboard?.writeText) {
+        try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }
+      }
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta); return ok;
+      } catch { return false; }
+    };
+    copyText(code).then(ok => {
+      if (ok) { setCodeCopied(true); setTimeout(() => setCodeCopied(false), 2000); }
     });
     onCopyCode?.();
   };

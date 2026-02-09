@@ -638,14 +638,8 @@ Use the available tools to fulfill this request. Always call finish() when done.
 
         # --- Context-aware suggestions based on what was just discussed ---
 
-        # After data cleaning
-        if any(w in msg_lower for w in ["clean", "чистити", "очистити", "почисти"]):
-            if mentioned_numeric:
-                suggestions.append({"text": f"Show distribution of {mentioned_numeric[0]} after cleaning", "category": "analysis"})
-            suggestions.append({"text": "Compare original vs cleaned data statistics", "category": "analysis"})
-
         # After statistics / summary
-        elif any(w in msg_lower for w in ["statistic", "mean", "average", "summary", "describe", "статистик", "середн"]):
+        if any(w in msg_lower for w in ["statistic", "mean", "average", "summary", "describe", "статистик", "середн"]):
             if mentioned_numeric:
                 col = mentioned_numeric[0]
                 suggestions.append({"text": f"Show distribution of {col}", "category": "visualization"})
@@ -683,17 +677,12 @@ Use the available tools to fulfill this request. Always call finish() when done.
 
         # After missing values / quality check
         elif any(w in msg_lower for w in ["missing", "пропущен", "missing value", "quality", "якіст"]):
-            has_missing = df.isnull().any().any()
-            has_duplicates = df.duplicated().any()
-            if has_missing or has_duplicates:
-                suggestions.append({"text": "Clean the data", "category": "cleaning"})
             if mentioned_numeric:
                 suggestions.append({"text": f"Show {mentioned_numeric[0]} statistics excluding missing rows", "category": "analysis"})
 
         # After outlier analysis
         elif any(w in msg_lower for w in ["outlier", "аномал", "викид"]):
             if mentioned_numeric:
-                suggestions.append({"text": f"Remove outliers from {mentioned_numeric[0]} and re-analyze", "category": "cleaning"})
                 suggestions.append({"text": f"Show box plot for {mentioned_numeric[0]}", "category": "visualization"})
 
         # After groupby / comparison
@@ -712,18 +701,6 @@ Use the available tools to fulfill this request. Always call finish() when done.
                 suggestions.append({"text": f"How does {col} relate to {mentioned_numeric[0]}?", "category": "analysis"})
             else:
                 suggestions.append({"text": f"What are the key statistics for {col}?", "category": "analysis"})
-
-        # Suggest cleaning if data has issues and hasn't been cleaned
-        if len(suggestions) < 3 and "clean" not in all_text:
-            has_missing = df.isnull().any().any()
-            has_duplicates = df.duplicated().any()
-            if has_missing or has_duplicates:
-                parts = []
-                if has_missing:
-                    parts.append(f"{df.isnull().sum().sum()} missing values")
-                if has_duplicates:
-                    parts.append(f"{df.duplicated().sum()} duplicates")
-                suggestions.append({"text": f"Clean the data ({', '.join(parts)})", "category": "cleaning"})
 
         # Business-oriented follow-up
         if len(suggestions) < 3 and numeric_cols:

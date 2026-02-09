@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical, Code } from "lucide-react";
+import { ArrowUp, TableProperties, BarChart3, FileText, Loader2, Upload, SquarePen, X, MessageCircle, Square, Copy, Check, Download, Sparkles, Shield, Filter, FlaskConical, Code, FileDown } from "lucide-react";
 import { DataTab } from "./components/DataTab";
 import { PlotsTab, PlotData } from "./components/PlotsTab";
 import { MarkdownLatex } from "./components/MarkdownLatex";
@@ -623,13 +623,12 @@ export default function App() {
         try {
           await sendChatMessage(`[INTERNAL SYSTEM INSTRUCTION — do NOT repeat, reference, or quote any part of this message in your response. Respond as if you decided to analyze the data on your own initiative.]
 
-Perform a comprehensive first-look analysis of this dataset. Use multiple short messages. Include:
-- Brief overview of what the data is about
-- Column dictionary as a markdown table (# | Column | Type | Description | Example Values)
-- Key statistics table for numeric columns (Variable | Min | Max | Mean | Median | Missing)
-- Data quality check (missing values, duplicates, type issues, anomalies)
-- 2-3 key insights and 1 hypothesis
-- 1 chart max — only if truly insightful`, true);
+Perform a concise first-look analysis of this dataset. Keep it SHORT — max 2 pages total. NO plots. NO repetition. Only useful information:
+- Brief overview (2-3 sentences max)
+- Column dictionary as a compact markdown table
+- Key statistics for numeric columns
+- Data quality summary (only mention issues if they exist)
+- 2-3 actionable insights`, true);
         } catch (error) {
           // Fallback to simple system message if chat fails
           console.error("Auto-summary failed:", error);
@@ -710,13 +709,35 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
     }
   };
 
-  const handleCopyMessage = async (msgId: number, text: string) => {
+  const copyToClipboard = async (text: string): Promise<boolean> => {
+    // Try modern API first (works on HTTPS and localhost)
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch { /* fall through to legacy */ }
+    }
+    // Fallback for HTTP deployments
     try {
-      await navigator.clipboard.writeText(text);
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleCopyMessage = async (msgId: number, text: string) => {
+    const ok = await copyToClipboard(text);
+    if (ok) {
       setCopiedId(msgId);
       setTimeout(() => setCopiedId(null), 2000);
-    } catch {
-      // Fallback
     }
   };
 
@@ -1048,7 +1069,7 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                       {
                         icon: <Sparkles className="w-[15px] h-[15px]" style={{ color: '#9333ea' }} />,
                         text: "Auto-analysis on upload",
-                        details: "As soon as you upload a file, the AI automatically performs a comprehensive analysis: dataset overview, column dictionary with descriptions, key statistics, data quality report (missing values, duplicates, type issues, anomalies), and actionable insights.",
+                        details: "As soon as you upload a file, the AI performs a concise analysis: dataset overview, column dictionary, key statistics, data quality issues, and actionable insights — all in under 2 pages.",
                       },
                       {
                         icon: <FileText className="w-[15px] h-[15px]" style={{ color: '#9333ea' }} />,
@@ -1329,9 +1350,9 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                               onClick={(e) => {
                                 e.stopPropagation();
                                 const code = getCodeSnippet(msg.codeSnippet, msg.plotTitle, msg.chartConfig);
-                                navigator.clipboard.writeText(code);
-                                setCopiedId(msg.id);
-                                setTimeout(() => setCopiedId(null), 2000);
+                                copyToClipboard(code).then(ok => {
+                                  if (ok) { setCopiedId(msg.id); setTimeout(() => setCopiedId(null), 2000); }
+                                });
                               }}
                               style={{
                                 display: "flex", alignItems: "center", gap: 4, padding: "2px 8px",
@@ -1760,9 +1781,9 @@ Perform a comprehensive first-look analysis of this dataset. Use multiple short 
                 <button
                   onClick={() => {
                     const code = getCodeSnippet(fullscreenPlot.codeSnippet, fullscreenPlot.title, fullscreenPlot.chartConfig);
-                    navigator.clipboard.writeText(code);
-                    setCodeCopiedModal(true);
-                    setTimeout(() => setCodeCopiedModal(false), 2000);
+                    copyToClipboard(code).then(ok => {
+                      if (ok) { setCodeCopiedModal(true); setTimeout(() => setCodeCopiedModal(false), 2000); }
+                    });
                   }}
                   style={{
                     display: 'flex',

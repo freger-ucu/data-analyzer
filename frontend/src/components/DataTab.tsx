@@ -10,17 +10,25 @@ interface FileInfo {
   preview: Record<string, unknown>[];
 }
 
+export interface Transformation {
+  timestamp: number;
+  description: string;
+  rowsBefore: number;
+  rowsAfter?: number;
+}
+
 interface DataTabProps {
   fileInfo: FileInfo | null;
   dataVersion: "current" | "original";
   onVersionChange: (version: "current" | "original") => void;
   sessionId: string | null;
   onViewFullData?: () => void;
+  transformations?: Transformation[];
 }
 
 const RENDER_CHUNK = 200;
 
-export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onViewFullData }: DataTabProps) {
+export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onViewFullData, transformations }: DataTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortColumn, setSortColumn] = useState<string | null>(null);
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
@@ -304,6 +312,35 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onV
         </div>
       )}
 
+      {/* Transformation timeline */}
+      {transformations && transformations.length > 0 && (
+        <div className="px-5 py-2.5 shrink-0" style={{ borderBottom: '1px solid rgba(147,51,234,0.12)' }}>
+          <p className="text-[10px] mb-1.5" style={{ fontWeight: 600, color: '#71717a', textTransform: 'uppercase', letterSpacing: '0.05em' }}>History</p>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {transformations.map((t, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 12, flexShrink: 0 }}>
+                  <div style={{
+                    width: 8, height: 8, borderRadius: '50%', flexShrink: 0, marginTop: 3,
+                    backgroundColor: i === transformations.length - 1 ? '#9333ea' : '#3f3a4a',
+                    boxShadow: i === transformations.length - 1 ? '0 0 6px rgba(147,51,234,0.5)' : 'none',
+                  }} />
+                  {i < transformations.length - 1 && (
+                    <div style={{ width: 1, flex: 1, backgroundColor: 'rgba(147,51,234,0.15)', minHeight: 12 }} />
+                  )}
+                </div>
+                <div style={{ paddingBottom: i < transformations.length - 1 ? 6 : 0, minWidth: 0 }}>
+                  <p className="text-[10px] truncate" style={{ fontWeight: 510, color: '#e4e4e7' }}>{t.description}</p>
+                  <p className="text-[9px]" style={{ color: '#52525b' }}>
+                    {t.rowsBefore}{t.rowsAfter != null ? ` → ${t.rowsAfter}` : ''} rows
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       <div
         ref={scrollRef}
@@ -364,29 +401,53 @@ export function DataTab({ fileInfo, dataVersion, onVersionChange, sessionId, onV
             </tr>
           </thead>
           <tbody>
-            {displayedData.map((row, rowIdx) => (
-              <tr
-                key={rowIdx}
-                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.05)'}
-                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-              >
-                {columns.map((col, i) => (
-                  <td
-                    key={col}
-                    className={`h-[28px] px-2 text-[11px] ${
-                      i > 0 ? "border-l" : "pl-[12px]"
-                    } border-b`}
-                    style={{
-                      fontWeight: 400,
-                      color: '#e4e4e7',
-                      borderColor: 'rgba(147,51,234,0.1)',
-                    }}
-                  >
-                    {String(row[col] ?? "")}
-                  </td>
-                ))}
-              </tr>
-            ))}
+            {isLoadingAll && !allRows ? (
+              /* Skeleton shimmer rows */
+              Array.from({ length: 12 }).map((_, rowIdx) => (
+                <tr key={`skel-${rowIdx}`}>
+                  {columns.map((col, i) => (
+                    <td
+                      key={col}
+                      className={`h-[28px] px-2 ${i > 0 ? "border-l" : "pl-[12px]"} border-b`}
+                      style={{ borderColor: 'rgba(147,51,234,0.1)' }}
+                    >
+                      <div
+                        className="skeleton-row"
+                        style={{
+                          height: 10,
+                          borderRadius: 4,
+                          width: `${50 + (rowIdx * 7 + i * 13) % 40}%`,
+                        }}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))
+            ) : (
+              displayedData.map((row, rowIdx) => (
+                <tr
+                  key={rowIdx}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.05)'}
+                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                >
+                  {columns.map((col, i) => (
+                    <td
+                      key={col}
+                      className={`h-[28px] px-2 text-[11px] ${
+                        i > 0 ? "border-l" : "pl-[12px]"
+                      } border-b`}
+                      style={{
+                        fontWeight: 400,
+                        color: '#e4e4e7',
+                        borderColor: 'rgba(147,51,234,0.1)',
+                      }}
+                    >
+                      {String(row[col] ?? "")}
+                    </td>
+                  ))}
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>
