@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { Search, ChevronDown, Upload, Filter, X, Download, Maximize2 } from "lucide-react";
+import { Search, ChevronDown, Upload, Filter, X, Maximize2 } from "lucide-react";
 
 interface FileInfo {
   filename: string;
@@ -84,30 +84,6 @@ export function DataTab({ fileInfo, onViewFullData }: DataTabProps) {
   const clearAllFilters = () => {
     setColumnFilters({});
     setSearchQuery("");
-  };
-
-  // Export data as CSV
-  const handleExportCsv = () => {
-    if (!fileInfo) return;
-    const rows = fileInfo.preview;
-    const cols = fileInfo.columns;
-    const csvRows = [cols.join(",")];
-    for (const row of rows) {
-      csvRows.push(cols.map((col) => {
-        const val = String(row[col] ?? "");
-        // Escape quotes and wrap in quotes if contains comma, quote, or newline
-        if (val.includes(",") || val.includes('"') || val.includes("\n")) {
-          return `"${val.replace(/"/g, '""')}"`;
-        }
-        return val;
-      }).join(","));
-    }
-    const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
-    const link = document.createElement("a");
-    link.download = fileInfo.filename.replace(".csv", "_export.csv");
-    link.href = URL.createObjectURL(blob);
-    link.click();
-    URL.revokeObjectURL(link.href);
   };
 
   // If no file uploaded, show placeholder
@@ -303,41 +279,29 @@ export function DataTab({ fileInfo, onViewFullData }: DataTabProps) {
       </div>
 
       {/* Footer — always visible */}
-      <div className="shrink-0 px-5 py-2 flex items-center justify-between relative z-20" style={{ borderTop: '1px solid rgba(147,51,234,0.12)' }}>
-        <p className="text-[10px]" style={{ color: '#a1a1aa' }}>
+      <div className="shrink-0 px-5 py-3 flex items-center justify-between relative z-20" style={{ borderTop: '1px solid rgba(147,51,234,0.12)' }}>
+        <p className="text-[11px]" style={{ color: '#a1a1aa' }}>
           {hasActiveFilters || searchQuery
             ? `${sortedData.length} of ${data.length} rows`
             : `${fileInfo.preview.length} rows (preview)`
           }
           {displayedData.length < sortedData.length && ` (showing ${displayedData.length})`}
         </p>
-        <div className="flex items-center gap-2">
-          {onViewFullData && (
-            <button
-              onClick={onViewFullData}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-all hover:opacity-90"
-              style={{
-                backgroundColor: 'rgba(147,51,234,0.12)',
-                border: '1px solid rgba(147,51,234,0.25)',
-              }}
-            >
-              <Maximize2 className="w-3 h-3" style={{ color: '#e4e4e7' }} />
-              <span className="text-[10px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>View Full</span>
-            </button>
-          )}
+        {onViewFullData && (
           <button
-            onClick={handleExportCsv}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-all hover:opacity-90"
+            onClick={onViewFullData}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all"
             style={{
-              background: 'linear-gradient(135deg, rgba(147,51,234,0.4) 0%, rgba(107,33,168,0.5) 100%)',
-              border: '1px solid rgba(147,51,234,0.35)',
-              boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
+              backgroundColor: 'rgba(147,51,234,0.12)',
+              border: '1px solid rgba(147,51,234,0.25)',
             }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.2)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.4)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.12)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.25)'; }}
           >
-            <Download className="w-3 h-3" style={{ color: '#e4e4e7' }} />
-            <span className="text-[10px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>Export CSV</span>
+            <Maximize2 className="w-3.5 h-3.5" style={{ color: '#e4e4e7' }} />
+            <span className="text-[11px]" style={{ fontWeight: 510, color: '#e4e4e7' }}>View Full</span>
           </button>
-        </div>
+        )}
       </div>
 
       {/* Column filter dropdown — portalled */}

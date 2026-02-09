@@ -102,11 +102,15 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [isSavingPlot, setIsSavingPlot] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(340);
   const [featurePopup, setFeaturePopup] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const plotExportRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dragCounterRef = useRef(0);
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const isDraggingDelimiterRef = useRef(false);
+  const dragStartRef = useRef({ x: 0, width: 0 });
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -123,6 +127,30 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
     const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
     mq.addEventListener("change", handler);
     return () => mq.removeEventListener("change", handler);
+  }, []);
+
+  // Sidebar resize drag handler (direct DOM manipulation for smoothness, sync state on mouseup)
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!isDraggingDelimiterRef.current) return;
+      const delta = e.clientX - dragStartRef.current.x;
+      const w = Math.min(600, Math.max(200, dragStartRef.current.width + delta));
+      if (sidebarRef.current) sidebarRef.current.style.width = `${w}px`;
+    };
+    const onUp = (e: MouseEvent) => {
+      if (!isDraggingDelimiterRef.current) return;
+      isDraggingDelimiterRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      const delta = e.clientX - dragStartRef.current.x;
+      setSidebarWidth(Math.min(600, Math.max(200, dragStartRef.current.width + delta)));
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
   }, []);
 
   // Close fullscreen data on Escape
@@ -714,18 +742,20 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
 
       {/* Left sidebar — hidden on mobile */}
       {!isMobile && (
-        <div className="flex flex-col gap-1.5 w-[340px] shrink-0 h-full min-w-0">
+        <div ref={sidebarRef} className="flex flex-col gap-1.5 shrink-0 h-full min-w-0" style={{ width: sidebarWidth, position: 'relative' }}>
           {/* Tab bar */}
           <GlassPanel className="shrink-0" style={{ backgroundColor: '#111111' }}>
             <div className="flex items-center py-2.5 px-2.5">
               <button
                 onClick={() => setActiveTab("data")}
-                className="flex-1 h-[24px] flex items-center justify-center gap-1.5 rounded-lg px-2 transition-colors"
+                className="flex-1 h-[24px] flex items-center justify-center gap-1.5 rounded-lg px-2 transition-all"
                 style={activeTab === "data" ? {
                   background: 'linear-gradient(135deg, rgba(147,51,234,0.5) 0%, rgba(107,33,168,0.6) 100%)',
                   border: '1px solid rgba(147,51,234,0.3)',
                   boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
                 } : { border: '1px solid transparent' }}
+                onMouseEnter={(e) => { if (activeTab !== "data") e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'; }}
+                onMouseLeave={(e) => { if (activeTab !== "data") e.currentTarget.style.backgroundColor = ''; }}
               >
                 <TableProperties className="w-[14px] h-[14px]" style={{ color: activeTab === "data" ? '#fff' : '#a1a1aa' }} />
                 <span className="text-[11px]" style={{ fontWeight: 510, color: activeTab === "data" ? '#fff' : '#a1a1aa' }}>
@@ -740,6 +770,8 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                   border: '1px solid rgba(147,51,234,0.3)',
                   boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), 0 1px 3px rgba(0,0,0,0.2)',
                 } : { border: '1px solid transparent' }}
+                onMouseEnter={(e) => { if (activeTab !== "history") e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'; }}
+                onMouseLeave={(e) => { if (activeTab !== "history") e.currentTarget.style.backgroundColor = ''; }}
               >
                 <MessageCircle className="w-[14px] h-[14px]" style={{ color: activeTab === "history" ? '#fff' : '#a1a1aa' }} />
                 <span className="text-[11px]" style={{ fontWeight: 510, color: activeTab === "history" ? '#fff' : '#a1a1aa' }}>
@@ -757,80 +789,124 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                   fileInfo={fileInfo}
                   onViewFullData={() => setShowFullData(true)}
                 />
+              ) : sessions.length === 0 ? (
+                <div className="flex flex-col h-full items-center justify-center gap-1 p-5">
+                  <p className="text-[12px] text-center" style={{ fontWeight: 470, color: '#71717a' }}>
+                    No sessions yet
+                  </p>
+                </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                  <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(147,51,234,0.12)' }}>
-                    <span style={{ fontSize: 13, fontWeight: 590, color: '#e4e4e7' }}>Sessions</span>
+                  <div className="flex items-center gap-2 px-5 py-3 shrink-0" style={{ borderBottom: '1px solid rgba(147,51,234,0.12)' }}>
+                    <span className="text-[10px] shrink-0" style={{ color: '#a1a1aa' }}>
+                      {sessions.length}
+                    </span>
+                    <span className="text-[13px]" style={{ fontWeight: 590, color: '#e4e4e7' }}>Sessions</span>
                   </div>
                   <div className="custom-scrollbar" style={{ flex: 1, overflow: 'auto' }}>
-                    {sessions.length === 0 ? (
-                      <p style={{ fontSize: 13, color: '#a1a1aa', textAlign: 'center', marginTop: 40, padding: '0 16px' }}>
-                        No sessions yet.
-                      </p>
-                    ) : (
-                      sessions.map((s) => (
-                        <div
-                          key={s.id}
-                          className="group"
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            padding: '10px 16px',
-                            borderBottom: '1px solid rgba(147,51,234,0.08)',
-                            backgroundColor: s.id === sessionId ? 'rgba(147,51,234,0.12)' : 'transparent',
-                            cursor: loadingSessionId ? 'default' : 'pointer',
-                            transition: 'background-color 0.15s',
-                            opacity: loadingSessionId && loadingSessionId !== s.id ? 0.5 : 1,
-                          }}
-                          onClick={() => loadSession(s.id)}
-                          onMouseEnter={(e) => { if (s.id !== sessionId && !loadingSessionId) e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.06)'; }}
-                          onMouseLeave={(e) => { if (s.id !== sessionId) e.currentTarget.style.backgroundColor = s.id === sessionId ? 'rgba(147,51,234,0.12)' : 'transparent'; }}
-                        >
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 13, fontWeight: 500, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {s.title || 'Untitled session'}
-                            </div>
-                            <div style={{ fontSize: 11, color: '#52525b', marginTop: 2 }}>
-                              {new Date(s.created_at).toLocaleDateString()}
-                            </div>
+                    {sessions.map((s) => (
+                      <div
+                        key={s.id}
+                        className="group"
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: '10px 20px',
+                          borderBottom: '1px solid rgba(147,51,234,0.08)',
+                          backgroundColor: s.id === sessionId ? 'rgba(147,51,234,0.12)' : 'transparent',
+                          cursor: loadingSessionId ? 'default' : 'pointer',
+                          transition: 'background-color 0.15s',
+                          opacity: loadingSessionId && loadingSessionId !== s.id ? 0.5 : 1,
+                        }}
+                        onClick={() => loadSession(s.id)}
+                        onMouseEnter={(e) => { if (s.id !== sessionId && !loadingSessionId) e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.06)'; }}
+                        onMouseLeave={(e) => { if (s.id !== sessionId) e.currentTarget.style.backgroundColor = s.id === sessionId ? 'rgba(147,51,234,0.12)' : 'transparent'; }}
+                      >
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 500, color: '#e4e4e7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {s.title || 'Untitled session'}
                           </div>
-                          {loadingSessionId === s.id ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ flexShrink: 0, marginLeft: 8, color: '#9333ea' }} />
-                          ) : (
-                            <button
-                              onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
-                              disabled={!!deletingSessionId}
-                              className="opacity-0 group-hover:opacity-100 transition-opacity"
-                              style={{
-                                flexShrink: 0,
-                                marginLeft: 8,
-                                width: 24,
-                                height: 24,
-                                borderRadius: 6,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                backgroundColor: 'transparent',
-                                border: '1px solid rgba(248,113,113,0.2)',
-                                color: '#f87171',
-                                cursor: deletingSessionId ? 'not-allowed' : 'pointer',
-                              }}
-                            >
-                              {deletingSessionId === s.id ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : (
-                                <X className="w-3 h-3" />
-                              )}
-                            </button>
-                          )}
+                          <div style={{ fontSize: 11, color: '#52525b', marginTop: 2 }}>
+                            {new Date(s.created_at).toLocaleDateString()}
+                          </div>
                         </div>
-                      ))
-                    )}
+                        {loadingSessionId === s.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ flexShrink: 0, marginLeft: 8, color: '#9333ea' }} />
+                        ) : (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                            disabled={!!deletingSessionId}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity"
+                            style={{
+                              flexShrink: 0,
+                              marginLeft: 8,
+                              width: 24,
+                              height: 24,
+                              borderRadius: 6,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              backgroundColor: 'transparent',
+                              border: '1px solid rgba(248,113,113,0.2)',
+                              color: '#f87171',
+                              cursor: deletingSessionId ? 'not-allowed' : 'pointer',
+                              transition: 'background-color 0.15s, border-color 0.15s',
+                            }}
+                            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(248,113,113,0.1)'; e.currentTarget.style.borderColor = 'rgba(248,113,113,0.4)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.borderColor = 'rgba(248,113,113,0.2)'; }}
+                          >
+                            {deletingSessionId === s.id ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <X className="w-3 h-3" />
+                            )}
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="shrink-0 px-5 py-3" style={{ borderTop: '1px solid rgba(147,51,234,0.12)' }}>
+                    <p className="text-[11px]" style={{ color: '#a1a1aa' }}>
+                      {sessions.length} {sessions.length === 1 ? 'session' : 'sessions'}
+                    </p>
                   </div>
                 </div>
               )}
             </div>
           </GlassPanel>
+
+          {/* Resize handle */}
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: -12,
+              width: 12,
+              height: '100%',
+              cursor: 'col-resize',
+              zIndex: 20,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              isDraggingDelimiterRef.current = true;
+              dragStartRef.current = { x: e.clientX, width: sidebarRef.current?.offsetWidth || sidebarWidth };
+              document.body.style.cursor = 'col-resize';
+              document.body.style.userSelect = 'none';
+            }}
+            onMouseEnter={(e) => {
+              const pill = e.currentTarget.firstElementChild as HTMLElement;
+              if (pill) pill.style.backgroundColor = 'rgba(147,51,234,0.5)';
+            }}
+            onMouseLeave={(e) => {
+              const pill = e.currentTarget.firstElementChild as HTMLElement;
+              if (pill) pill.style.backgroundColor = 'rgba(147,51,234,0.2)';
+            }}
+          >
+            <div style={{ width: 3, height: 40, borderRadius: 99, backgroundColor: 'rgba(147,51,234,0.2)', transition: 'background-color 0.15s' }} />
+          </div>
         </div>
       )}
 
@@ -844,24 +920,28 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                   fileInfo={fileInfo}
                   onViewFullData={() => setShowFullData(true)}
                 />
+              ) : sessions.length === 0 ? (
+                <div className="flex flex-col h-full items-center justify-center gap-1 p-5">
+                  <p className="text-[12px] text-center" style={{ fontWeight: 470, color: '#71717a' }}>
+                    No sessions yet
+                  </p>
+                </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                  <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(147,51,234,0.12)' }}>
-                    <span style={{ fontSize: 13, fontWeight: 590, color: '#e4e4e7' }}>Sessions</span>
+                  <div className="flex items-center gap-2 px-5 py-3 shrink-0" style={{ borderBottom: '1px solid rgba(147,51,234,0.12)' }}>
+                    <span className="text-[10px] shrink-0" style={{ color: '#a1a1aa' }}>
+                      {sessions.length}
+                    </span>
+                    <span className="text-[13px]" style={{ fontWeight: 590, color: '#e4e4e7' }}>Sessions</span>
                   </div>
                   <div className="custom-scrollbar" style={{ flex: 1, overflow: 'auto' }}>
-                    {sessions.length === 0 ? (
-                      <p style={{ fontSize: 13, color: '#a1a1aa', textAlign: 'center', marginTop: 40, padding: '0 16px' }}>
-                        No sessions yet.
-                      </p>
-                    ) : (
-                      sessions.map((s) => (
+                    {sessions.map((s) => (
                         <div
                           key={s.id}
                           style={{
                             display: 'flex',
                             alignItems: 'center',
-                            padding: '10px 16px',
+                            padding: '10px 20px',
                             borderBottom: '1px solid rgba(147,51,234,0.08)',
                             backgroundColor: s.id === sessionId ? 'rgba(147,51,234,0.12)' : 'transparent',
                             cursor: loadingSessionId ? 'default' : 'pointer',
@@ -896,7 +976,10 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                                 border: '1px solid rgba(248,113,113,0.2)',
                                 color: '#f87171',
                                 cursor: deletingSessionId ? 'not-allowed' : 'pointer',
+                                transition: 'background-color 0.15s, border-color 0.15s',
                               }}
+                              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(248,113,113,0.1)'; e.currentTarget.style.borderColor = 'rgba(248,113,113,0.4)'; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.borderColor = 'rgba(248,113,113,0.2)'; }}
                             >
                               {deletingSessionId === s.id ? (
                                 <Loader2 className="w-3 h-3 animate-spin" />
@@ -906,8 +989,12 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                             </button>
                           )}
                         </div>
-                      ))
-                    )}
+                      ))}
+                  </div>
+                  <div className="shrink-0 px-5 py-3" style={{ borderTop: '1px solid rgba(147,51,234,0.12)' }}>
+                    <p className="text-[11px]" style={{ color: '#a1a1aa' }}>
+                      {sessions.length} {sessions.length === 1 ? 'session' : 'sessions'}
+                    </p>
                   </div>
                 </div>
               )}
@@ -942,6 +1029,8 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                   backdropFilter: 'blur(10px)',
                 }}
                 title="Start a new conversation"
+                onMouseEnter={(e) => { e.currentTarget.style.filter = 'brightness(1.2)'; e.currentTarget.style.transform = 'scale(1.04)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.filter = ''; e.currentTarget.style.transform = ''; }}
               >
                 <SquarePen className="w-[14px] h-[14px]" style={{ color: '#fff' }} />
                 <span className="text-[12px]" style={{ fontWeight: 500, color: '#fff' }}>New</span>
@@ -954,6 +1043,8 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                   border: '1px solid rgba(147,51,234,0.2)',
                 }}
                 title="Sign out"
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.4)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.2)'; }}
               >
                 <LogOut className="w-[14px] h-[14px]" style={{ color: '#a1a1aa' }} />
               </button>
@@ -1089,7 +1180,10 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                                     cursor: 'pointer',
                                     color: '#a1a1aa',
                                     flexShrink: 0,
+                                    transition: 'background-color 0.15s, border-color 0.15s',
                                   }}
+                                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.25)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.4)'; }}
+                                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.1)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.2)'; }}
                                 >
                                   <X className="w-3.5 h-3.5" />
                                 </button>
@@ -1293,12 +1387,14 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
               <button
                 onClick={handleFileAttach}
                 disabled={isLoading}
-                className="w-full flex items-center justify-center gap-2 rounded-full px-6 py-3 transition-all disabled:opacity-50 hover:opacity-90"
+                className="w-full flex items-center justify-center gap-2 rounded-full px-6 py-3 transition-all disabled:opacity-50"
                 style={{
                   background: 'linear-gradient(135deg, rgba(147,51,234,0.5) 0%, rgba(107,33,168,0.6) 100%)',
                   border: '1px solid rgba(147,51,234,0.4)',
                   boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.1), 0 2px 4px rgba(0,0,0,0.3)',
                 }}
+                onMouseEnter={(e) => { e.currentTarget.style.filter = 'brightness(1.2)'; e.currentTarget.style.transform = 'scale(1.02)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.filter = ''; e.currentTarget.style.transform = ''; }}
               >
                 {isLoading ? (
                   <Loader2 className="w-[15px] h-[15px] animate-spin" style={{ color: '#fff' }} />
@@ -1330,6 +1426,8 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                     className={`w-[36px] h-[36px] rounded-full flex items-center justify-center relative overflow-hidden shrink-0 transition-all duration-200 ${
                       isLoading || hasContent ? "cursor-pointer" : "cursor-default"
                     }`}
+                    onMouseEnter={(e) => { if (isLoading || hasContent) e.currentTarget.style.transform = 'scale(1.1)'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.transform = ''; }}
                   >
                     <div className="absolute inset-0 rounded-full" style={isLoading ? {
                       background: 'linear-gradient(135deg, rgba(147,51,234,0.6) 0%, rgba(107,33,168,0.7) 100%)',
@@ -1428,7 +1526,10 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                   border: '1px solid rgba(255,255,255,0.2)',
                   cursor: 'pointer',
                   boxShadow: '0 2px 8px rgba(147,51,234,0.4)',
+                  transition: 'filter 0.15s, transform 0.15s',
                 }}
+                onMouseEnter={(e) => { e.currentTarget.style.filter = 'brightness(1.15)'; e.currentTarget.style.transform = 'scale(1.04)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.filter = ''; e.currentTarget.style.transform = ''; }}
               >
                 <span style={{ fontSize: 18, lineHeight: 1 }}>&times;</span>
                 Close
@@ -1541,8 +1642,10 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                 border: 'none',
                 cursor: 'pointer',
                 color: mobileView === tab.key ? '#9333ea' : '#a1a1aa',
-                transition: 'color 0.15s',
+                transition: 'color 0.15s, background-color 0.15s',
               }}
+              onMouseEnter={(e) => { if (mobileView !== tab.key) e.currentTarget.style.color = '#c084fc'; }}
+              onMouseLeave={(e) => { if (mobileView !== tab.key) e.currentTarget.style.color = '#a1a1aa'; }}
             >
               {tab.icon}
               <span style={{ fontSize: 10, fontWeight: 510 }}>{tab.label}</span>
@@ -1613,7 +1716,10 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                     border: '1px solid rgba(147,51,234,0.3)',
                     cursor: isSavingPlot ? 'not-allowed' : 'pointer',
                     opacity: isSavingPlot ? 0.7 : 1,
+                    transition: 'background-color 0.15s, border-color 0.15s',
                   }}
+                  onMouseEnter={(e) => { if (!isSavingPlot) { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.25)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.5)'; } }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'rgba(147,51,234,0.15)'; e.currentTarget.style.borderColor = 'rgba(147,51,234,0.3)'; }}
                 >
                   {isSavingPlot ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
                   {isSavingPlot ? 'Saving...' : 'Save PNG'}
@@ -1633,7 +1739,10 @@ function MainApp({ token, onLogout }: { token: string; onLogout: () => void }) {
                     border: '1px solid rgba(255,255,255,0.2)',
                     cursor: 'pointer',
                     boxShadow: '0 2px 8px rgba(147,51,234,0.4)',
+                    transition: 'filter 0.15s, transform 0.15s',
                   }}
+                  onMouseEnter={(e) => { e.currentTarget.style.filter = 'brightness(1.15)'; e.currentTarget.style.transform = 'scale(1.04)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.filter = ''; e.currentTarget.style.transform = ''; }}
                 >
                   <span style={{ fontSize: 18, lineHeight: 1 }}>&times;</span>
                   Close

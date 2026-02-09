@@ -6,6 +6,8 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./data_analyzer.db"
     ACCESS_TOKEN_EXPIRE_DAYS: int = 30
     ANTHROPIC_API_KEY: str = ""
+    DATA_DIR: str = "data"
+    MAX_UPLOAD_SIZE: int = 1_073_741_824  # 1 GB
 
     model_config = {
         "env_file": ".env",
