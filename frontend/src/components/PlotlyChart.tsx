@@ -41,9 +41,11 @@ const DARK_LAYOUT: Partial<Plotly.Layout> = {
   colorway: PURPLE_COLORS,
   margin: { l: 50, r: 20, t: 40, b: 40 },
   autosize: true,
+  bargap: 0.25,
+  bargroupgap: 0.1,
   hoverlabel: {
     bgcolor: "#1e1b2e",
-    bordercolor: "rgba(147,51,234,0.4)",
+    bordercolor: "rgba(147,51,234,0.5)",
     font: { color: "#e4e4e7", size: 12 },
   },
 };
@@ -143,9 +145,21 @@ export function PlotlyChart({ spec, interactive = false }: PlotlyChartProps) {
         return t as Plotly.Data;
       }
 
+      const baseColor = PURPLE_COLORS[i % PURPLE_COLORS.length];
       if (!marker?.color && !line?.color) {
-        t.marker = { ...(marker || {}), color: PURPLE_COLORS[i % PURPLE_COLORS.length] };
+        t.marker = { ...(marker || {}), color: baseColor };
       }
+
+      // Bar styling: subtle border + slight opacity for depth
+      if (t.type === "bar" || (!t.type && (t as Record<string, unknown>).x && (t as Record<string, unknown>).y)) {
+        const m = (t.marker || {}) as Record<string, unknown>;
+        t.marker = {
+          ...m,
+          opacity: 0.88,
+          line: { color: "rgba(255,255,255,0.08)", width: 1, ...(m.line as Record<string, unknown> || {}) },
+        } as unknown as Plotly.PlotData["marker"];
+      }
+
       return t as Plotly.Data;
     });
 
@@ -164,10 +178,33 @@ export function PlotlyChart({ spec, interactive = false }: PlotlyChartProps) {
       scrollZoom: interactive,
     });
 
+    // Hover highlight: brighten hovered point, dim others
+    el.on("plotly_hover", (eventData: Plotly.PlotHoverEvent) => {
+      const pt = eventData.points[0];
+      if (!pt) return;
+      const traceIdx = pt.curveNumber;
+      const trace = traces[traceIdx] as Record<string, unknown>;
+      if (trace.type === "heatmap" || trace.type === "pie") return;
+
+      const update: Record<string, unknown> = {};
+      update["marker.opacity"] = [1.0];
+      Plotly.restyle(el, update, [traceIdx]);
+    });
+
+    el.on("plotly_unhover", () => {
+      // Restore original opacity for all bar traces
+      traces.forEach((trace, i) => {
+        const t = trace as Record<string, unknown>;
+        if (t.type === "heatmap" || t.type === "pie") return;
+        const origOpacity = (t.type === "bar" || (!t.type && t.x && t.y)) ? 0.88 : 1.0;
+        Plotly.restyle(el, { "marker.opacity": [origOpacity] }, [i]);
+      });
+    });
+
     return () => {
       Plotly.purge(el);
     };
   }, [spec, interactive]);
 
-  return <div ref={containerRef} style={{ width: "100%", height: "100%" }} />;
+  return <div ref={containerRef} style={{ width: "100%", height: "100%", borderRadius: 12, overflow: "hidden" }} />;
 }
